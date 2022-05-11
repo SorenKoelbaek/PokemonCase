@@ -15,14 +15,6 @@ val spark = SparkSession
   .getOrCreate()
 
 
-val executeRestApiUDF = udf(new UDF1[String, String] {
-  override def call(url: String) = {
-    val httpRequest = new HttpRequest;
-    httpRequest.ExecuteHttpGet(url).getOrElse("")
-  }
-}, StringType)
-
-
 //We define the schema of our iterator requests; adding the object array to our schema object.
 val PokemonIteraterObject = (new StructType)
         .add("name", StringType)
@@ -48,18 +40,15 @@ var PokemonIterater_df = spark.createDataFrame(spark.sparkContext
 
 while(hasnext)
 {
-  var restApiCallsToMake = Seq(RestAPIRequest(uri));
-  var source_df = restApiCallsToMake.toDF();
-  val execute_df = source_df
-  .withColumn("result", executeRestApiUDF(col("url")))
-  .withColumn("result", from_json(col("result"), PokemonIteraterSchema))
-
-  var nextUrl = execute_df.select(col("result.next")).first().getString(0);
+  val httpRequest = new HttpRequest;
+  val source_df = spark.read.json(Seq(httpRequest.ExecuteHttpGet(uri)).toDS())
+  
+  var nextUrl = source_df.select(col("next")).first().getString(0);
   
 //Explode the Pokemon result object alongside the attributed URL
-  val delta_df =  execute_df.select(explode(col("result.Results")).alias("pokemons"))
+  val delta_df =  source_df.select(explode(col("Results")).alias("pokemons"))
       .select(col("pokemons.name"), col("pokemons.url"))
-   
+ 
   PokemonIterater_df = PokemonIterater_df.union(delta_df);
   
   //Check if the next URL is set, if not stop the while loop
@@ -74,50 +63,14 @@ while(hasnext)
 
 }
 
-
-//Now we loop through all pokemons in our Iterator-list to extract information on each pokemon and save that into our Raw filesystem alongside a watermark and extraction URL.
-// Defining the pokemon response schema
-val PokemonSchema = StructType(List(
-  StructField("base_experience", IntegerType, true),
-  StructField("id", IntegerType, true),
-  StructField("order", IntegerType, true),
-  StructField("name", StringType, true),
-  StructField("weight", IntegerType, true),
-  StructField("height", IntegerType, true),
-
-))
-
-case class pokemonUrl(name:String, url:String)
-var pokemons_df = spark.createDataFrame(spark.sparkContext
-      .emptyRDD[Row], PokemonSchema)
-
-PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t => 
-{
-  val uri = t.url
-  val name = t.name
-
-
-  var restApiCallsToMake = Seq(RestAPIRequest(uri));
-  var source_df = restApiCallsToMake.toDF();
-  val execute_df = source_df
-  .withColumn("result", executeRestApiUDF(col("url")))
-  .withColumn("result", from_json(col("result"), PokemonSchema))
-  
-  
-  val delta_df =  execute_df.select(col("result.*"))
-   
-  pokemons_df = pokemons_df.union(delta_df);
-})
-
-
-pokemons_df.write.mode('Overwrite').json("/tmp/spark_output/zipcodes.json")
+PokemonIterater_df.cache()
 
 
 case class RestAPIRequest (url: String)
 
 class HttpRequest {
-   def ExecuteHttpGet(url: String) : Option[String] = {
-
+   def ExecuteHttpGet(url: String) = {
+    
     val client: OkHttpClient = new OkHttpClient();
 
     val headerBuilder = new Headers.Builder
@@ -138,11 +91,80 @@ class HttpRequest {
         case _: Throwable => null
       }
 
-    Option[String](result)
+    
+   result
   }
 
  
 }
+
+// COMMAND ----------
+
+
+//Now we loop through all pokemons in our Iterator-list to extract information on each pokemon and save that into our Raw filesystem alongside a watermark and extraction URL.
+
+//We declare our schema to enfore our extraction
+  //Types
+val PokemonType = (new StructType)
+        .add("name", StringType)
+        .add("url", StringType)
+
+val PokemonTypeSlots = (new StructType)
+        .add("slot", IntegerType)
+        .add("type", PokemonType)
+
+val PokemonTypes = new ArrayType(PokemonTypeSlots, false)
+
+  //Games
+val PokemonGameVersion = (new StructType)
+        .add("name", StringType)
+        .add("url", StringType)
+
+val PokemonGame = (new StructType)
+        .add("game_index", IntegerType)
+        .add("version", PokemonGameVersion)
+
+val PokemonGames = new ArrayType(PokemonGame, false)
+  
+  //Sprites
+val PokemonSprites = (new StructType)
+        .add("front_default", StringType)
+
+
+
+val PokemonSchema: StructType = (new StructType)
+  .add("types", PokemonTypes)
+  .add("game_indices", PokemonGames)
+  .add("sprites", PokemonSprites)
+  .add("base_experience", IntegerType)
+  .add("weight", IntegerType)
+  .add("height", IntegerType)
+  .add("order", IntegerType)
+
+//Hash these to support Pseudonymisation of data
+  .add("id", IntegerType)
+  .add("name", StringType)
+
+
+case class pokemonUrl(name:String, url:String)
+var pokemons_df = spark.createDataFrame(spark.sparkContext
+      .emptyRDD[Row], PokemonSchema)
+
+//Painfully slow!
+//--> Maybe try a map or other type that natively supports iteration instead
+
+PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t => 
+{
+ val uri = t.url
+ val name = t.name
+
+ val httpRequest = new HttpRequest;
+ val source_df = spark.read.schema(PokemonSchema).json(Seq(httpRequest.ExecuteHttpGet(uri)).toDS())
+  
+ pokemons_df = pokemons_df.union(source_df);
+})
+
+pokemons_df.cache()
 
 // COMMAND ----------
 
