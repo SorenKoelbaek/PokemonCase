@@ -23,31 +23,61 @@ val executeRestApiUDF = udf(new UDF1[String, String] {
 }, StringType)
 
 
-//We build a collection of pokemons to iterate over, for our extract
-val uri = "https://pokeapi.co/api/v2/pokemon"
-val hasnext = true;
+//We define the schema of our iterator requests; adding the object array to our schema object.
+val PokemonIteraterObject = (new StructType)
+        .add("name", StringType)
+        .add("url", StringType)
+
+val pokemonIteraterResults = new ArrayType(PokemonIteraterObject, false)
+
+val PokemonIteraterSchema: StructType = (new StructType)
+  .add("results", pokemonIteraterResults)
+  .add("next", StringType)
+
+
+
+//We are doing a lazy while loop to iterate over the default API Pagination
+//checking the next value and extracting the default (20) pokemons at each request.
+  // --> this would benefit of a recursive function instead; change if time allows.
+var uri = "https://pokeapi.co/api/v2/pokemon";
+var hasnext = true;
+
+//Declare a dataframe to hold our collected object --> maybe use a list instead?
+var PokemonIterater_df = spark.createDataFrame(spark.sparkContext
+      .emptyRDD[Row], PokemonIteraterObject)
+
 while(hasnext)
 {
-  case class PokemonIteraterRequest(url:string)
-  val PokeMonIeraterCall = Seq(PokemonIteraterRequest(uri))
-  val page_df = PokemonIteraterCall.toDF()
- 
+  var restApiCallsToMake = Seq(RestAPIRequest(uri));
+  var source_df = restApiCallsToMake.toDF();
+  val execute_df = source_df
+  .withColumn("result", executeRestApiUDF(col("url")))
+  .withColumn("result", from_json(col("result"), PokemonIteraterSchema))
+
+  var nextUrl = execute_df.select(col("result.next")).first().getString(0);
+  
+//Explode the Pokemon result object alongside the attributed URL
+  val delta_df =  execute_df.select(explode(col("result.Results")).alias("pokemons"))
+      .select(col("pokemons.name"), col("pokemons.url"))
+   
+  PokemonIterater_df = PokemonIterater_df.union(delta_df);
+  
+  //Check if the next URL is set, if not stop the while loop
+  if(nextUrl != null)
+  {
+    uri = nextUrl;
+  } 
+  else
+  {
+    hasnext = false;
+  }
+
 }
 
 
-// Lets set up an example test
-// create the Dataframe to bind the UDF to
-case class RestAPIRequest (url: String)
-val uri = "https://pokeapi.co/api/v2/pokemon/1";
-val restApiCallsToMake = Seq(RestAPIRequest(uri))
-val source_df = restApiCallsToMake.toDF()
-
-
-
-
-
-// Define the schema used to format the REST response.  This will be used by from_json
-val restApiSchema = StructType(List(
+//Now we loop through all pokemons in our Iterator-list to extract information on each pokemon and save that into our Raw filesystem alongside a watermark and extraction URL.
+// Defining the pokemon response schema
+val PokemonSchema = StructType(List(
   StructField("base_experience", IntegerType, true),
   StructField("id", IntegerType, true),
   StructField("order", IntegerType, true),
@@ -57,19 +87,33 @@ val restApiSchema = StructType(List(
 
 ))
 
-// add the UDF column, and a column to parse the output to
-// a structure that we can interogate on the dataframe
-val execute_df = source_df
+case class pokemonUrl(name:String, url:String)
+var pokemons_df = spark.createDataFrame(spark.sparkContext
+      .emptyRDD[Row], PokemonSchema)
+
+PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t => 
+{
+  val uri = t.url
+  val name = t.name
+
+
+  var restApiCallsToMake = Seq(RestAPIRequest(uri));
+  var source_df = restApiCallsToMake.toDF();
+  val execute_df = source_df
   .withColumn("result", executeRestApiUDF(col("url")))
-  .withColumn("result", from_json(col("result"), restApiSchema))
+  .withColumn("result", from_json(col("result"), PokemonSchema))
+  
+  
+  val delta_df =  execute_df.select(col("result.*"))
+   
+  pokemons_df = pokemons_df.union(delta_df);
+})
 
-execute_df.show()
 
-// call an action on the Dataframe to execute the UDF
-// process the results
-execute_df.select(col("result.*"))
-      .show
+pokemons_df.write.mode('Overwrite').json("/tmp/spark_output/zipcodes.json")
 
+
+case class RestAPIRequest (url: String)
 
 class HttpRequest {
    def ExecuteHttpGet(url: String) : Option[String] = {
