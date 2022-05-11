@@ -1,7 +1,7 @@
 // Databricks notebook source
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.api.java.UDF1
-import org.apache.spark.sql.functions.{col, udf, from_json, explode}
+import org.apache.spark.sql.functions.{col, udf, from_json, explode, sha2}
 import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
 import okhttp3.{Headers, OkHttpClient, Request, Response}
 
@@ -102,99 +102,48 @@ class HttpRequest {
 
 
 //Now we loop through all pokemons in our Iterator-list to extract information on each pokemon and save that into our Raw filesystem alongside a watermark and extraction URL.
-
-//We declare our schema to enfore our extraction
-  //Types
-val PokemonType = (new StructType)
-        .add("name", StringType)
-        .add("url", StringType)
-
-val PokemonTypeSlots = (new StructType)
-        .add("slot", IntegerType)
-        .add("type", PokemonType)
-
-val PokemonTypes = new ArrayType(PokemonTypeSlots, false)
-
-  //Games
-val PokemonGameVersion = (new StructType)
-        .add("name", StringType)
-        .add("url", StringType)
-
-val PokemonGame = (new StructType)
-        .add("game_index", IntegerType)
-        .add("version", PokemonGameVersion)
-
-val PokemonGames = new ArrayType(PokemonGame, false)
-  
-  //Sprites
-val PokemonSprites = (new StructType)
-        .add("front_default", StringType)
-
-
-val PokemonSchema: StructType = (new StructType)
-  .add("types", PokemonTypes)
-  .add("game_indices", PokemonGames)
-  .add("sprites", PokemonSprites)
-  .add("base_experience", IntegerType)
-  .add("weight", IntegerType)
-  .add("height", IntegerType)
-  .add("order", IntegerType)
-  .add("Identifier",StringType)
-//Hash these to support Pseudonymisation of data
-  .add("id", IntegerType)
-  .add("name", StringType)
-
-val PokemonIdentifierSchema: StructType = (new StructType)
-  .add("id", IntegerType)
-  .add("name", StringType)
-  .add("Identifier",StringType)
-
-
-var pokemons_df = spark.createDataFrame(spark.sparkContext
-      .emptyRDD[Row], PokemonSchema)
-var pokemonsID_df = spark.createDataFrame(spark.sparkContext
-      .emptyRDD[Row], PokemonSchema)
+import org.apache.spark.sql.functions.current_timestamp   
 
 case class pokemonUrl(name:String, url:String)
-//Painfully slow!
-//--> Maybe try a map or other type that natively supports iteration instead
-PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t => 
-{
- val uri = t.url
- val name = t.name
-
- val httpRequest = new HttpRequest;
- val source_df = spark.read.schema(PokemonSchema).json(Seq(httpRequest.ExecuteHttpGet(uri)).toDS())
- 
- val identifiable_df = source_df.select(col("name"), col("id")).withColumn("Identifier",sha2(col("name"),256))
- val pseudonymised_df = source_df.withColumn("Identifier",sha2(col("name"),256)).drop("name").drop("id")
-  
-  
-pokemons_df = pokemons_df.unionByName(pseudonymised_df,allowMissingColumns=true);
-  
-pokemonsID_df = pokemonsID_df.unionByName(identifiable_df,allowMissingColumns=true);
- 
-})
-
-pokemons_df.cache()
-
-
-// COMMAND ----------
 
 import java.sql.Timestamp
 import java.text.SimpleDateFormat
 import java.time.Instant
 
-
-
 //We store our Extracted data, the only manipulation we've done so far is to identify and split our PII data into two different stores, in order for our Pseudonymisation to work!
 val now: Timestamp = Timestamp.from(Instant.now())
 val date = new SimpleDateFormat("yyyyMMdd").format(now)
 
-val dirFull = "/FileStore/raw/PokemonFull/".concat(date).concat("/")
 val DirPseudo = "/FileStore/raw/Pokemon_Pseudonymised/".concat(date).concat("/")
 val dirIdentifier = "/FileStore/raw/Pokemon_Identifier/".concat(date).concat("/")
 
+val index = PokemonIterater_df.count.toInt
 
-pokemonsID_df.withColumn("ProcessedAt",current_timestamp()).write.mode("overwrite").format("json").save(dirIdentifier)
-pokemons_df.withColumn("ProcessedAt",current_timestamp()).write.mode("overwrite").format("json").save(DirPseudo)
+
+PokemonIterater_df.as[pokemonUrl].take(index).foreach(t => 
+{
+ val uri = t.url
+ val name = t.name
+
+ val httpRequest = new HttpRequest;
+ val source_df = spark.read.json(Seq(httpRequest.ExecuteHttpGet(uri)).toDS())
+
+ val identifiable_df = source_df.select(col("name"), col("id")).withColumn("Identifier",sha2(col("name"),256));
+ val pseudonymised_df = source_df.withColumn("Identifier",sha2(col("name"),256)).drop("name").drop("id").drop("species").drop("forms");
+
+  identifiable_df.withColumn("current_timestamp",current_timestamp().as("current_timestamp")).write.mode("overwrite").format("json").save(dirIdentifier);
+  pseudonymised_df.withColumn("current_timestamp",current_timestamp().as("current_timestamp")).write.mode("overwrite").format("json").save(DirPseudo);
+ 
+})
+
+
+
+// COMMAND ----------
+
+//dbutils.fs.rm("/FileStore/raw/Pokemon_Pseudonymised/",true)
+//dbutils.fs.rm("/FileStore/raw/Pokemon_Identifier/",true)
+
+
+// COMMAND ----------
+
+
