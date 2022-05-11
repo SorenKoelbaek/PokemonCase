@@ -131,7 +131,6 @@ val PokemonSprites = (new StructType)
         .add("front_default", StringType)
 
 
-
 val PokemonSchema: StructType = (new StructType)
   .add("types", PokemonTypes)
   .add("game_indices", PokemonGames)
@@ -140,19 +139,25 @@ val PokemonSchema: StructType = (new StructType)
   .add("weight", IntegerType)
   .add("height", IntegerType)
   .add("order", IntegerType)
-
+  .add("Identifier",StringType)
 //Hash these to support Pseudonymisation of data
   .add("id", IntegerType)
   .add("name", StringType)
 
+val PokemonIdentifierSchema: StructType = (new StructType)
+  .add("id", IntegerType)
+  .add("name", StringType)
+  .add("Identifier",StringType)
 
-case class pokemonUrl(name:String, url:String)
+
 var pokemons_df = spark.createDataFrame(spark.sparkContext
       .emptyRDD[Row], PokemonSchema)
+var pokemonsID_df = spark.createDataFrame(spark.sparkContext
+      .emptyRDD[Row], PokemonSchema)
 
+case class pokemonUrl(name:String, url:String)
 //Painfully slow!
 //--> Maybe try a map or other type that natively supports iteration instead
-
 PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t => 
 {
  val uri = t.url
@@ -160,12 +165,36 @@ PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t
 
  val httpRequest = new HttpRequest;
  val source_df = spark.read.schema(PokemonSchema).json(Seq(httpRequest.ExecuteHttpGet(uri)).toDS())
+ 
+ val identifiable_df = source_df.select(col("name"), col("id")).withColumn("Identifier",sha2(col("name"),256))
+ val pseudonymised_df = source_df.withColumn("Identifier",sha2(col("name"),256)).drop("name").drop("id")
   
- pokemons_df = pokemons_df.union(source_df);
+  
+pokemons_df = pokemons_df.unionByName(pseudonymised_df,allowMissingColumns=true);
+  
+pokemonsID_df = pokemonsID_df.unionByName(identifiable_df,allowMissingColumns=true);
+ 
 })
 
 pokemons_df.cache()
 
+
 // COMMAND ----------
 
+import java.sql.Timestamp
+import java.text.SimpleDateFormat
+import java.time.Instant
 
+
+
+//We store our Extracted data, the only manipulation we've done so far is to identify and split our PII data into two different stores, in order for our Pseudonymisation to work!
+val now: Timestamp = Timestamp.from(Instant.now())
+val date = new SimpleDateFormat("yyyyMMdd").format(now)
+
+val dirFull = "/FileStore/raw/PokemonFull/".concat(date).concat("/")
+val DirPseudo = "/FileStore/raw/Pokemon_Pseudonymised/".concat(date).concat("/")
+val dirIdentifier = "/FileStore/raw/Pokemon_Identifier/".concat(date).concat("/")
+
+
+pokemonsID_df.withColumn("ProcessedAt",current_timestamp()).write.mode("overwrite").format("json").save(dirIdentifier)
+pokemons_df.withColumn("ProcessedAt",current_timestamp()).write.mode("overwrite").format("json").save(DirPseudo)
