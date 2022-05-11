@@ -3,7 +3,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.api.java.UDF1
 import org.apache.spark.sql.functions.{col, udf, from_json, explode}
 import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
-import okhttp3.{Headers, OkHttpClient, Request, Response}
+//import okhttp3.{Headers, OkHttpClient, Request, Response}
 
 
 
@@ -56,34 +56,34 @@ execute_df.select(col("result.*"))
       .show
 
 
-class HttpRequest {
+// class HttpRequest {
+//    def ExecuteHttpGet(url: String) : Option[String] = {
 
-  def ExecuteHttpGet(url: String) : Option[String] = {
+//     val client: OkHttpClient = new OkHttpClient();
 
-    val client: OkHttpClient = new OkHttpClient();
+//     val headerBuilder = new Headers.Builder
+//     val headers = headerBuilder
+//       .add("content-type", "application/json")
+//       .build
 
-    val headerBuilder = new Headers.Builder
-    val headers = headerBuilder
-      .add("content-type", "application/json")
-      .build
+//     val result = try {
+//         val request = new Request.Builder()
+//           .url(url)
+//           .headers(headers)
+//           .build();
 
-    val result = try {
-        val request = new Request.Builder()
-          .url(url)
-          .headers(headers)
-          .build();
+//         val response: Response = client.newCall(request).execute()
+//         response.body().string()
+//       }
+//       catch {
+//         case _: Throwable => null
+//       }
 
-        val response: Response = client.newCall(request).execute()
-        response.body().string()
-      }
-      catch {
-        case _: Throwable => null
-      }
+//     Option[String](result)
+//   }
 
-    Option[String](result)
-  }
-
-}
+ 
+// }
 
 // COMMAND ----------
 

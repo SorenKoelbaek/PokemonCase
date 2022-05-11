@@ -1,0 +1,5 @@
+.metals/metals.lock.db
+.metals/metals.log
+.metals/metals.mv.db
+.vscode/launch.json
+.vscode/settings.json
