@@ -117,10 +117,8 @@ val date = new SimpleDateFormat("yyyyMMdd").format(now)
 val DirPseudo = "/FileStore/raw/Pokemon_Pseudonymised/".concat(date).concat("/")
 val dirIdentifier = "/FileStore/raw/Pokemon_Identifier/".concat(date).concat("/")
 
-val index = PokemonIterater_df.count.toInt
 
-
-PokemonIterater_df.as[pokemonUrl].take(index).foreach(t => 
+PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t => 
 {
  val uri = t.url
  val name = t.name
@@ -140,8 +138,8 @@ PokemonIterater_df.as[pokemonUrl].take(index).foreach(t =>
 
 // COMMAND ----------
 
-//dbutils.fs.rm("/FileStore/raw/Pokemon_Pseudonymised/",true)
-//dbutils.fs.rm("/FileStore/raw/Pokemon_Identifier/",true)
+dbutils.fs.rm("/FileStore/raw/Pokemon_Pseudonymised/",true)
+dbutils.fs.rm("/FileStore/raw/Pokemon_Identifier/",true)
 
 
 // COMMAND ----------
