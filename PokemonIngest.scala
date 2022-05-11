@@ -22,12 +22,27 @@ val executeRestApiUDF = udf(new UDF1[String, String] {
   }
 }, StringType)
 
+
+//We build a collection of pokemons to iterate over, for our extract
+val uri = "https://pokeapi.co/api/v2/pokemon"
+val hasnext = true;
+while(hasnext)
+{
+  case class PokemonIteraterRequest(url:string)
+  val PokeMonIeraterCall = Seq(PokemonIteraterRequest(uri))
+  val page_df = PokemonIteraterCall.toDF()
+ 
+}
+
+
 // Lets set up an example test
 // create the Dataframe to bind the UDF to
 case class RestAPIRequest (url: String)
 val uri = "https://pokeapi.co/api/v2/pokemon/1";
 val restApiCallsToMake = Seq(RestAPIRequest(uri))
 val source_df = restApiCallsToMake.toDF()
+
+
 
 
 
