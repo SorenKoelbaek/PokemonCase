@@ -129,8 +129,8 @@ PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t
  val identifiable_df = source_df.select(col("name"), col("id"), col("species"), col("forms")).withColumn("Identifier",sha2(col("name"),256));
  val pseudonymised_df = source_df.withColumn("Identifier",sha2(col("name"),256)).drop("name").drop("id").drop("species").drop("forms").drop("moves");
 
-  identifiable_df.withColumn("current_timestamp",current_timestamp().as("current_timestamp")).write.mode("overwrite").format("json").save(dirIdentifier);
-  pseudonymised_df.withColumn("current_timestamp",current_timestamp().as("current_timestamp")).write.mode("overwrite").format("json").save(DirPseudo);
+  identifiable_df.withColumn("current_timestamp",current_timestamp().as("current_timestamp")).write.mode("append").format("json").save(dirIdentifier);
+  pseudonymised_df.withColumn("current_timestamp",current_timestamp().as("current_timestamp")).write.mode("append").format("json").save(DirPseudo);
  
 })
 
@@ -144,7 +144,12 @@ PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t
 
 //dbutils.fs.rm("/FileStore/raw/Pokemon_Pseudonymised/",true)
 //dbutils.fs.rm("/FileStore/raw/Pokemon_Identifier/",true)
+//dbutils.fs.rm("/dbfs/FileStore/test/Pokemon_Identifier",true)
 
+// COMMAND ----------
+
+//%sql drop table pokemon_identifier
+//%sql drop table Pokemon_Pseudonymised
 
 // COMMAND ----------
 
