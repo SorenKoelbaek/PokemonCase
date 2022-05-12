@@ -1,6 +1,5 @@
 // Databricks notebook source
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.api.java.UDF1
 import org.apache.spark.sql.functions.{col, udf, from_json, explode, sha2}
 import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
 import okhttp3.{Headers, OkHttpClient, Request, Response}

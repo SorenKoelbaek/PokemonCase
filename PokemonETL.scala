@@ -20,6 +20,7 @@ val Pokemon_Pseudonymised_df = spark.readStream.format("cloudFiles")
 val EffStart = current_timestamp()
 val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
 
+//Do we really need to truncate in our streaming setup, or can we make sure in our select we only take the newest???
 sql("drop table if exists SourcePokemonIdentifier_temp")
 sql("drop table if exists SourcePokemons_temp")
 
