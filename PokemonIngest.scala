@@ -65,7 +65,6 @@ while(hasnext)
 
 PokemonIterater_df.cache()
 
-
 case class RestAPIRequest (url: String)
 
 class HttpRequest {
@@ -125,21 +124,26 @@ PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t
 
  val httpRequest = new HttpRequest;
  val source_df = spark.read.json(Seq(httpRequest.ExecuteHttpGet(uri)).toDS())
-
- val identifiable_df = source_df.select(col("name"), col("id")).withColumn("Identifier",sha2(col("name"),256));
- val pseudonymised_df = source_df.withColumn("Identifier",sha2(col("name"),256)).drop("name").drop("id").drop("species").drop("forms");
+  //We split our data into two, (identifiable or not) and use sha_256 to encrypt our unique pokemon name.
+  //I drop the moves variable as it is huge.
+ val identifiable_df = source_df.select(col("name"), col("id"), col("species"), col("forms")).withColumn("Identifier",sha2(col("name"),256));
+ val pseudonymised_df = source_df.withColumn("Identifier",sha2(col("name"),256)).drop("name").drop("id").drop("species").drop("forms").drop("moves");
 
   identifiable_df.withColumn("current_timestamp",current_timestamp().as("current_timestamp")).write.mode("overwrite").format("json").save(dirIdentifier);
   pseudonymised_df.withColumn("current_timestamp",current_timestamp().as("current_timestamp")).write.mode("overwrite").format("json").save(DirPseudo);
  
 })
 
+//Rewrite again, to increase performance of the data dump -- way too slow:
+  //Create a single dataframe from the responses and then write that to disk.
+  //Use partition in the streamwriter to partition by timestamp, instead of manually creating the directory.
+
 
 
 // COMMAND ----------
 
-dbutils.fs.rm("/FileStore/raw/Pokemon_Pseudonymised/",true)
-dbutils.fs.rm("/FileStore/raw/Pokemon_Identifier/",true)
+//dbutils.fs.rm("/FileStore/raw/Pokemon_Pseudonymised/",true)
+//dbutils.fs.rm("/FileStore/raw/Pokemon_Identifier/",true)
 
 
 // COMMAND ----------
