@@ -144,13 +144,5 @@ PokemonIterater_df.as[pokemonUrl].take(PokemonIterater_df.count.toInt).foreach(t
 
 //dbutils.fs.rm("/FileStore/raw/Pokemon_Pseudonymised/",true)
 //dbutils.fs.rm("/FileStore/raw/Pokemon_Identifier/",true)
-//dbutils.fs.rm("/dbfs/FileStore/test/Pokemon_Identifier",true)
-
-// COMMAND ----------
-
-//%sql drop table pokemon_identifier
-//%sql drop table Pokemon_Pseudonymised
-
-// COMMAND ----------
 
 
