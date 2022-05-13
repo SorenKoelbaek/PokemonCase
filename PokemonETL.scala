@@ -37,10 +37,10 @@ val Pokemons_identifier_df = Pokemon_df
 val deltaTablePokemons = DeltaTable.forName("sourcePokemon")
 
 
-//Bug: When we receive changed information -- we only mark the Old ones as non-current, we are not including the new rows :( So either non-matched or if match
-// -- Possible solution is to union our updated to itself without a match, but still insert them with the mergekey - Argh! (That will bring me closer to the sample though)
 
-//We do a deltatable merge operation to ensure that matched pokemon, while new in the landingzone are only updated if their values differ. We also maintain our SCD2 rows here.
+//We do a deltatable merge operation to ensure that matched pokemon, while new in the landingzone are only updated if their values differ. We also maintain our SCD2 rows here. we DO NOT mark missing as deleted.
+
+We do not keep a record on deletion in our snapshot: 
 def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
   
    val updateDF = streamBatchDF
@@ -48,6 +48,7 @@ def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
     .join(deltaTablePokemons.toDF.as("pokemons"),"Identifier")
     .where("pokemons.Current = true AND (pokemons.abilities <> updates.abilities or pokemons.base_experience <> updates.base_experience or pokemons.game_indices <> updates.game_indices or pokemons.height <> updates.height or pokemons.held_items <> updates.held_items or pokemons.is_default <> updates.is_default or pokemons.location_area_encounters <> updates.location_area_encounters or pokemons.moves <> updates.moves or pokemons.order <> updates.order or pokemons.past_types <> updates.past_types or pokemons.sprites <> updates.sprites or pokemons.stats <> updates.stats or pokemons.types <> updates.types or pokemons.weight <> updates.weight )")
     .selectExpr("updates.*")
+
   
   val combinedSCD2DF = updateDF
     .selectExpr("NULL as mergeKey","updates.*")
@@ -66,7 +67,8 @@ def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
   .updateExpr(
      Map(
        "current" -> "false",
-       "ValidTo" -> "updates.ValidFrom"
+       "ValidTo" -> "updates.ValidFrom",
+       "ModifiedDate" -> "updates.ModifiedDate"
      ))
   .whenNotMatched()
     .insertExpr(
@@ -279,6 +281,12 @@ FilteredPokemons_df.writeStream
 
 // COMMAND ----------
 
+//Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
+
+//Define our dimensions and the fact table for the reporting
+
+// COMMAND ----------
+
 
 
 
@@ -295,12 +303,6 @@ FilteredPokemons_df.writeStream
 //       .option("checkpointLocation","FileStore/Schema/PokemonIdentifier")
 //       .table("PokemonIdentifier")
 //        )
-
-// COMMAND ----------
-
-//Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
-
-//Define our dimensions and the fact table for the reporting
 
 // COMMAND ----------
 
