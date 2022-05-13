@@ -38,39 +38,112 @@ val Pokemons_identifier_df = Pokemon_df
 val deltaTablePokemons = DeltaTable.forName("sourcePokemon")
 
 
+//Bug: When we receive changed information -- we only mark the Old ones as non-current, we are not including the new rows :( So either non-matched or if match
+// -- Possible solution is to union our updated to itself without a match, but still insert them with the mergekey - Argh! (That will bring me closer to the sample though)
+
 //We do a deltatable merge operation to ensure that matched pokemon, while new in the landingzone are only updated if their values differ. We also maintain our SCD2 rows here.
 def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
+  
+   val updateDF = streamBatchDF
+    .as("updates")
+    .join(deltaTablePokemons.toDF.as("pokemons"),"Identifier")
+    .where("pokemons.Current = true AND (pokemons.abilities <> updates.abilities or pokemons.base_experience <> updates.base_experience or pokemons.game_indices <> updates.game_indices or pokemons.height <> updates.height or pokemons.held_items <> updates.held_items or pokemons.is_default <> updates.is_default or pokemons.location_area_encounters <> updates.location_area_encounters or pokemons.moves <> updates.moves or pokemons.order <> updates.order or pokemons.past_types <> updates.past_types or pokemons.sprites <> updates.sprites or pokemons.stats <> updates.stats or pokemons.types <> updates.types or pokemons.weight <> updates.weight )")
+    .selectExpr("updates.*")
+  
+  val combinedSCD2DF = updateDF
+    .selectExpr("NULL as mergeKey","updates.*")
+    .unionByName(
+        streamBatchDF.withColumn("Mergekey",col("Identifier"))
+    )
+    
+  
+  
   deltaTablePokemons
   .as("pokemons")
   .merge(
-    streamBatchDF.as("updates"),
-    "pokemons.Identifier = updates.Identifier")
+    combinedSCD2DF.as("updates"),
+    "pokemons.Identifier = updates.mergeKey")
   .whenMatched("pokemons.Current = true AND (pokemons.abilities <> updates.abilities or pokemons.base_experience <> updates.base_experience or pokemons.game_indices <> updates.game_indices or pokemons.height <> updates.height or pokemons.held_items <> updates.held_items or pokemons.is_default <> updates.is_default or pokemons.location_area_encounters <> updates.location_area_encounters or pokemons.moves <> updates.moves or pokemons.order <> updates.order or pokemons.past_types <> updates.past_types or pokemons.sprites <> updates.sprites or pokemons.stats <> updates.stats or pokemons.types <> updates.types or pokemons.weight <> updates.weight )")
   .updateExpr(
      Map(
        "current" -> "false",
        "ValidTo" -> "updates.ValidFrom"
      ))
-  .whenNotMatched().insertAll()
+  .whenNotMatched()
+    .insertExpr(
+    Map(
+      "Identifier" -> "updates.Identifier",
+      "abilities" -> "updates.abilities",
+      "base_experience" -> "updates.base_experience",
+      "game_indices" -> "updates.game_indices",
+      "height" -> "updates.height",
+      "held_items" -> "updates.held_items",
+      "is_default" -> "updates.is_default",
+      "location_area_encounters" -> "updates.location_area_encounters",
+      "moves" -> "updates.moves",
+      "order" -> "updates.order",
+      "past_types" -> "updates.past_types",
+      "sprites" -> "updates.sprites",
+      "stats" -> "updates.stats",
+      "types" -> "updates.types",
+      "weight" -> "updates.weight",
+      "date" -> "updates.date",
+      "_rescued_data" -> "updates._rescued_data",
+      "ModifiedDate" -> "updates.ModifiedDate",
+      "current_timestamp" -> "updates.current_timestamp",
+      "Current" -> "updates.Current",
+      "ValidFrom" -> "updates.ValidFrom",
+      "ValidTo" -> "updates.ValidTo",
+      "ModifiedDate" -> "updates.ModifiedDate"
+    ))
   .execute()
+  
 }
 
 
 val deltaTablePokemons_identifier = DeltaTable.forName("sourcePokemon_Identifier")
 
 def upsertPokemonIdentifiersStream(streamBatchDF: DataFrame, batchId: Long) {
+  
+  val updateDF = streamBatchDF
+    .as("updates")
+    .join(deltaTablePokemons_identifier.toDF.as("pokemonIdentifier"),"Identifier")
+    .where("pokemonIdentifier.Current = true AND (pokemonIdentifier.name <> updates.name or pokemonIdentifier.id <> updates.id or pokemonIdentifier.species <> pokemonIdentifier.species or pokemonIdentifier.forms <> pokemonIdentifier.forms )")
+    .selectExpr("updates.*")
+  
+  val combinedSCD2DF = updateDF
+    .selectExpr("NULL as mergeKey","updates.*")
+    .unionByName(
+        streamBatchDF.withColumn("Mergekey",col("Identifier"))
+    )
+    
+  
   deltaTablePokemons_identifier
   .as("pokemons")
   .merge(
-    streamBatchDF.as("updates"),
-    "pokemons.Identifier = updates.Identifier")
+    combinedSCD2DF.as("updates"),
+    "pokemons.Identifier = updates.mergeKey")
   .whenMatched("pokemons.Current = true AND (pokemons.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms )")
   .updateExpr(
      Map(
        "current" -> "false",
-       "ValidTo" -> "updates.ValidFrom"
+       "ValidTo" -> "updates.ValidFrom",
+       "ModifiedDate" -> "updates.ModifiedDate",
      ))
-  .whenNotMatched().insertAll()
+  .whenNotMatched()
+  .insertExpr(
+    Map(
+      "Identifier" -> "updates.Identifier",
+      "name" -> "updates.name",
+      "id" -> "updates.id",
+      "forms" -> "updates.forms",
+      "species" -> "updates.species",
+      "Current" -> "updates.Current",
+      "ValidFrom" -> "updates.ValidFrom",
+      "ValidTo" -> "updates.ValidTo",
+      "ModifiedDate" -> "updates.ModifiedDate"
+    )
+  )
   .execute()
 }
 
@@ -92,12 +165,6 @@ Pokemons_identifier_df.writeStream
 
 // COMMAND ----------
 
-// MAGIC %sql
-// MAGIC select count(*) from sourcePokemon union all
-// MAGIC select count(*) from sourcePokemon_Identifier
-
-// COMMAND ----------
-
 //We do our Transformation between the bronze and Silver Layer, here we format and strip the information we need, while also adjusting our tables for the for the objects we need - we output to new database tables and maintain our logic for our SCD2.
 
 import org.apache.spark.sql.SparkSession
@@ -112,16 +179,18 @@ val spark = SparkSession
   .getOrCreate()
 
 
-val pokemons_df = spark.readStream.format("delta").table("SourcePokemon")
-val pokemonIdentifier_df = spark.readStream.format("delta").table("sourcePokemon_Identifier")
+val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("SourcePokemon") //In order to get updated rows as well as new one
+val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("sourcePokemon_Identifier") //In order to get new rows!
 
 val deltaTablePokemons = DeltaTable.forName("Pokemon")
 
+
+//As we track our information in the bronze/extract layer, a change will always just have to be updated and new rows inserted
 def upsertToPokemons(batchDF: DataFrame, batchId: Long) {
   deltaTablePokemons.as("pokemons")
     .merge(
       batchDF.as("updates"),
-      "pokemons.Identifier = updates.Identifier AND pokemons.Current = updates.Current")
+      "pokemons.Identifier = updates.Identifier AND pokemons.ValidFrom = updates.ValidFrom")
     .whenMatched().updateAll()
     .whenNotMatched().insertAll()
     .execute()
@@ -133,11 +202,14 @@ def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
   deltaTablePokemonsIdentifier.as("pokemonIdentifier")
     .merge(
       batchDF.as("updates"),
-      "pokemonIdentifier.Identifier = updates.Identifier AND pokemonIdentifier.Current = updates.Current")
+      "pokemonIdentifier.Identifier = updates.Identifier AND pokemonIdentifier.ValidFrom = updates.ValidFrom")
     .whenMatched().updateAll()
     .whenNotMatched().insertAll()
     .execute()
-}
+} 
+
+
+
 
 //We do our transformations and filters the pokemons
 val FilteredPokemons_df =  pokemons_df
@@ -173,29 +245,28 @@ val FilteredpokemonIdentifier_df = pokemonIdentifier_df
     .withColumn("name",initcap(col("name")))
     
 
+
+
+
 FilteredPokemons_df.writeStream
-  .format("delta")
-  .foreachBatch(upsertToPokemons _)
-  .outputMode("update")
-  .start()
+    .format("delta")
+    .foreachBatch(upsertToPokemons _)
+    .outputMode("update")
+    .start()
 
-FilteredpokemonIdentifier_df.writeStream
-  .format("delta")
-  .foreachBatch(upsertToPokemonIdentifiers _)
-  .outputMode("update")
-  .start()
+  FilteredpokemonIdentifier_df.writeStream
+    .format("delta")
+    .foreachBatch(upsertToPokemonIdentifiers _)
+    .outputMode("update")
+    .start()
 
 
-
-// COMMAND ----------
-
-// MAGIC %sql
-// MAGIC select count(*) from Pokemon union all
-// MAGIC select count(*) from PokemonIdentifier
 
 // COMMAND ----------
 
 //Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
+
+//Define 
 
 // COMMAND ----------
 
@@ -209,7 +280,9 @@ FilteredpokemonIdentifier_df.writeStream
 // COMMAND ----------
 
 //Clean if need to rerun
-//dbutils.fs.rm("/FileStore/Schema/",true)
+//dbutils.fs.rm("FileStore/Schema/PokemonIdentifier/",true)
+//dbutils.fs.rm("FileStore/Schema/Pokemon/",true)
+
 
 // COMMAND ----------
 

@@ -98,9 +98,8 @@ class HttpRequest {
 
 
 //Now we loop through all pokemons in our Iterator-list to extract information on each pokemon and save that into our Raw filesystem alongside a watermark.
-import org.apache.spark.sql.functions.current_timestamp   
-import org.apache.spark.sql.functions.to_date
 
+import org.apache.spark.sql.functions.{col, udf, from_json, explode, sha2, current_timestamp, to_date, lit}
 import java.sql.Timestamp
 import java.text.SimpleDateFormat
 import java.time.Instant
@@ -133,7 +132,7 @@ val Pokemons_df = spark.read.json(pokemons_ds)
 // COMMAND ----------
 
 
-val df = spark.read.json("/FileStore/raw/Pokemon/")
+//val df = spark.read.json("/FileStore/raw/Pokemon/")
 
 //dbutils.fs.rm("/FileStore/raw/Pokemon/",true)
 
