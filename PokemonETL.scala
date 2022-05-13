@@ -1,157 +1,100 @@
 // Databricks notebook source
 //Ingest JSON data into our DeltaLake using autoloader for a streambased ingestion pattern
-import org.apache.spark.sql.functions.{current_timestamp, lit}   
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql._
+import io.delta.tables._
 
-val Pokemon_Identifier_df = spark.readStream.format("cloudFiles")
+val Pokemon_df = spark.readStream.format("cloudFiles")
       .option("cloudFiles.format", "json")
-      .option("cloudFiles.schemaLocation","/FileStore/test/Pokemon_Identifier")
+      .option("cloudFiles.schemaLocation","/FileStore/test/Pokemon")
       .option("cloudFiles.inferColumnTypes", "true")
       .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
-      .load("/FileStore/raw/Pokemon_Identifier/*/*.json")
-
-val Pokemon_Pseudonymised_df = spark.readStream.format("cloudFiles")
-      .option("cloudFiles.format", "json")
-      .option("cloudFiles.schemaLocation","/FileStore/test/Pokemon_Pseudonymised")
-      .option("cloudFiles.inferColumnTypes", "true")
-      .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
-      .load("/FileStore/raw/Pokemon_Pseudonymised/*/*.json")
+      .load("/FileStore/raw/Pokemon/*/*.json")
 
 //we add a ValidFrom and ValidTo values to our database tables
 val EffStart = current_timestamp()
 val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
 
-//Do we really need to truncate in our streaming setup, or can we make sure in our select we only take the newest???
-sql("drop table if exists SourcePokemonIdentifier_temp")
-sql("drop table if exists SourcePokemons_temp")
+val pokemons_updates_df = Pokemon_df
+                           .filter(array_contains(col("game_indices.version.name"),"red") || array_contains(col("game_indices.version.name"),"blue") || array_contains(col("game_indices.version.name"),"leafgreen")  || array_contains(col("game_indices.version.name"),"white"))
+                           .withColumn("Identifier",sha2(col("name"),256))
+                           .drop("name","id","species","forms")
+                           .withColumn("ModifiedDate",EffStart)
+                           .withColumn("ValidFrom",EffStart)
+                           .withColumn("ValidTo",lit(EffEnd))
+                           .withColumn("Current",lit(true))
 
-//we write our datestream
-(Pokemon_Identifier_df
-       .withColumn("ModifiedDate",EffStart)
-       .withColumn("ValidFrom",EffStart)
-       .withColumn("ValidTo",lit(EffEnd))
-       .withColumn("Current",lit(true))
-       .writeStream.format("delta")
-       .option("trigger.once",true)
-       .option("checkpointLocation","FileStore/test/Pokemon_Identifier")
-       .table("SourcePokemonIdentifier_temp")
-        )
- (Pokemon_Pseudonymised_df
-       .withColumn("ModifiedDate",EffStart)
-       .withColumn("ValidFrom",EffStart)
-       .withColumn("ValidTo",lit(EffEnd))
-       .withColumn("Current",lit(true))
-       .writeStream.format("delta")
-       .option("trigger.once",true)
-       .option("checkpointLocation","FileStore/test/Pokemon_Pseudonymised")
-       .table("SourcePokemons_temp")
-        )
- 
+
+val Pokemons_identifier_df = Pokemon_df
+                              .filter(array_contains(col("game_indices.version.name"),"red") || array_contains(col("game_indices.version.name"),"blue") || array_contains(col("game_indices.version.name"),"leafgreen")  || array_contains(col("game_indices.version.name"),"white"))
+                             .select("name","id","species","forms")
+                             .withColumn("Identifier",sha2(col("name"),256))  
+                             .withColumn("ModifiedDate",EffStart)
+                             .withColumn("ValidFrom",EffStart)
+                             .withColumn("ValidTo",lit(EffEnd))
+                             .withColumn("Current",lit(true))
+
+
+val deltaTablePokemons = DeltaTable.forName("sourcePokemon")
+
+
+//We do a deltatable merge operation to ensure that matched pokemon, while new in the landingzone are only updated if their values differ. We also maintain our SCD2 rows here.
+def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
+  deltaTablePokemons
+  .as("pokemons")
+  .merge(
+    streamBatchDF.as("updates"),
+    "pokemons.Identifier = updates.Identifier")
+  .whenMatched("pokemons.Current = true AND (pokemons.abilities <> updates.abilities or pokemons.base_experience <> updates.base_experience or pokemons.game_indices <> updates.game_indices or pokemons.height <> updates.height or pokemons.held_items <> updates.held_items or pokemons.is_default <> updates.is_default or pokemons.location_area_encounters <> updates.location_area_encounters or pokemons.moves <> updates.moves or pokemons.order <> updates.order or pokemons.past_types <> updates.past_types or pokemons.sprites <> updates.sprites or pokemons.stats <> updates.stats or pokemons.types <> updates.types or pokemons.weight <> updates.weight )")
+  .updateExpr(
+     Map(
+       "current" -> "false",
+       "ValidTo" -> "updates.ValidFrom"
+     ))
+  .whenNotMatched().insertAll()
+  .execute()
+}
+
+
+val deltaTablePokemons_identifier = DeltaTable.forName("sourcePokemon_Identifier")
+
+def upsertPokemonIdentifiersStream(streamBatchDF: DataFrame, batchId: Long) {
+  deltaTablePokemons_identifier
+  .as("pokemons")
+  .merge(
+    streamBatchDF.as("updates"),
+    "pokemons.Identifier = updates.Identifier")
+  .whenMatched("pokemons.Current = true AND (pokemons.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms )")
+  .updateExpr(
+     Map(
+       "current" -> "false",
+       "ValidTo" -> "updates.ValidFrom"
+     ))
+  .whenNotMatched().insertAll()
+  .execute()
+}
+
+
+
+//We write our merge using foreachbatch to ensure our merge can happens in our streaming environment 
+pokemons_updates_df.writeStream
+  .format("delta")
+  .foreachBatch(upsertPokemonStream _)
+  .outputMode("update")
+  .start()
+
+Pokemons_identifier_df.writeStream
+  .format("delta")
+  .foreachBatch(upsertPokemonIdentifiersStream _)
+  .outputMode("update")
+  .start()
+
 
 // COMMAND ----------
 
 // MAGIC %sql
-// MAGIC --Merge the delta with our current data, checking for updates, and if so updating the SCD2 information in our tables
-// MAGIC 
-// MAGIC MERGE INTO SourcePokemons
-// MAGIC 
-// MAGIC USING (
-// MAGIC 
-// MAGIC   SELECT SourcePokemons_temp.Identifier as mergeKey, SourcePokemons_temp.*
-// MAGIC   FROM SourcePokemons_temp
-// MAGIC 
-// MAGIC   UNION ALL
-// MAGIC   -- These rows will INSERT new addresses of existing customers 
-// MAGIC 
-// MAGIC   -- Setting the mergeKey to NULL forces these rows to NOT MATCH and be INSERTed.
-// MAGIC 
-// MAGIC   SELECT NULL as mergeKey, SourcePokemons_temp.*
-// MAGIC 
-// MAGIC   FROM SourcePokemons_temp JOIN SourcePokemons
-// MAGIC 
-// MAGIC   ON SourcePokemons_temp.Identifier = SourcePokemons.Identifier 
-// MAGIC 
-// MAGIC   WHERE SourcePokemons.Current = true 
-// MAGIC         AND 
-// MAGIC          (SourcePokemons.abilities <> SourcePokemons_temp.abilities or
-// MAGIC           SourcePokemons.base_experience <> SourcePokemons_temp.base_experience or
-// MAGIC           SourcePokemons.game_indices <> SourcePokemons_temp.game_indices or
-// MAGIC           SourcePokemons.height <> SourcePokemons_temp.height or
-// MAGIC           SourcePokemons.held_items <> SourcePokemons_temp.held_items or
-// MAGIC           SourcePokemons.is_default <> SourcePokemons_temp.is_default or
-// MAGIC           SourcePokemons.location_area_encounters <> SourcePokemons_temp.location_area_encounters or
-// MAGIC           SourcePokemons.order <> SourcePokemons_temp.order or
-// MAGIC           SourcePokemons.past_types <> SourcePokemons_temp.past_types or
-// MAGIC           SourcePokemons.sprites <> SourcePokemons_temp.sprites or
-// MAGIC           SourcePokemons.stats <> SourcePokemons_temp.stats or
-// MAGIC           SourcePokemons.types <> SourcePokemons_temp.types or
-// MAGIC           SourcePokemons.weight <> SourcePokemons_temp.weight)
-// MAGIC 
-// MAGIC ) staged_pokemons
-// MAGIC 
-// MAGIC ON SourcePokemons.Identifier = mergeKey
-// MAGIC WHEN MATCHED 
-// MAGIC   AND SourcePokemons.Current = true 
-// MAGIC   AND 
-// MAGIC      (SourcePokemons.abilities <> staged_pokemons.abilities or
-// MAGIC       SourcePokemons.base_experience <> staged_pokemons.base_experience or
-// MAGIC       SourcePokemons.game_indices <> staged_pokemons.game_indices or
-// MAGIC       SourcePokemons.height <> staged_pokemons.height or
-// MAGIC       SourcePokemons.held_items <> staged_pokemons.held_items or
-// MAGIC       SourcePokemons.is_default <> staged_pokemons.is_default or
-// MAGIC       SourcePokemons.location_area_encounters <> staged_pokemons.location_area_encounters or
-// MAGIC       SourcePokemons.order <> staged_pokemons.order or
-// MAGIC       SourcePokemons.past_types <> staged_pokemons.past_types or
-// MAGIC       SourcePokemons.sprites <> staged_pokemons.sprites or
-// MAGIC       SourcePokemons.stats <> staged_pokemons.stats or
-// MAGIC       SourcePokemons.types <> staged_pokemons.types or
-// MAGIC       SourcePokemons.weight <> staged_pokemons.weight)
-// MAGIC     THEN  
-// MAGIC   UPDATE 
-// MAGIC     SET Current = false, ValidTo = staged_pokemons.ValidFrom
-// MAGIC WHEN NOT MATCHED THEN 
-// MAGIC   INSERT *;
-// MAGIC   
-// MAGIC MERGE INTO SourcePokemonIdentifier
-// MAGIC 
-// MAGIC USING (
-// MAGIC 
-// MAGIC   SELECT SourcePokemonIdentifier_temp.Identifier as mergeKey, SourcePokemonIdentifier_temp.*
-// MAGIC   FROM SourcePokemonIdentifier_temp
-// MAGIC 
-// MAGIC   UNION ALL
-// MAGIC   -- These rows will INSERT new addresses of existing customers 
-// MAGIC 
-// MAGIC   -- Setting the mergeKey to NULL forces these rows to NOT MATCH and be INSERTed.
-// MAGIC 
-// MAGIC   SELECT NULL as mergeKey, SourcePokemonIdentifier_temp.*
-// MAGIC 
-// MAGIC   FROM SourcePokemonIdentifier_temp JOIN SourcePokemonIdentifier
-// MAGIC 
-// MAGIC   ON SourcePokemonIdentifier_temp.Identifier = SourcePokemonIdentifier.Identifier 
-// MAGIC 
-// MAGIC   WHERE SourcePokemonIdentifier.Current = true 
-// MAGIC         AND 
-// MAGIC          (SourcePokemonIdentifier.forms <> SourcePokemonIdentifier_temp.forms or
-// MAGIC           SourcePokemonIdentifier.id <> SourcePokemonIdentifier_temp.id or
-// MAGIC           SourcePokemonIdentifier.name <> SourcePokemonIdentifier_temp.name or
-// MAGIC           SourcePokemonIdentifier.species <> SourcePokemonIdentifier_temp.species
-// MAGIC          )
-// MAGIC 
-// MAGIC ) staged_pokemonIdentifier
-// MAGIC 
-// MAGIC ON SourcePokemonIdentifier.Identifier = mergeKey
-// MAGIC WHEN MATCHED 
-// MAGIC   AND SourcePokemonIdentifier.Current = true 
-// MAGIC   AND 
-// MAGIC      (SourcePokemonIdentifier.forms <> staged_pokemonIdentifier.forms or
-// MAGIC       SourcePokemonIdentifier.id <> staged_pokemonIdentifier.id or
-// MAGIC       SourcePokemonIdentifier.name <> staged_pokemonIdentifier.name or
-// MAGIC       SourcePokemonIdentifier.species <> staged_pokemonIdentifier.species)
-// MAGIC     THEN  
-// MAGIC   UPDATE 
-// MAGIC     SET Current = false, ValidTo = staged_pokemonIdentifier.ValidFrom
-// MAGIC WHEN NOT MATCHED THEN 
-// MAGIC   INSERT *;
+// MAGIC select count(*) from sourcePokemon union all
+// MAGIC select count(*) from sourcePokemon_Identifier
 
 // COMMAND ----------
 
@@ -169,10 +112,34 @@ val spark = SparkSession
   .getOrCreate()
 
 
-val pokemons_df = spark.readStream.format("delta").table("SourcePokemons")
-val pokemonIdentifier_df = spark.readStream.format("delta").table("SourcePokemonIdentifier")
+val pokemons_df = spark.readStream.format("delta").table("SourcePokemon")
+val pokemonIdentifier_df = spark.readStream.format("delta").table("sourcePokemon_Identifier")
 
+val deltaTablePokemons = DeltaTable.forName("Pokemon")
 
+def upsertToPokemons(batchDF: DataFrame, batchId: Long) {
+  deltaTablePokemons.as("pokemons")
+    .merge(
+      batchDF.as("updates"),
+      "pokemons.Identifier = updates.Identifier AND pokemons.Current = updates.Current")
+    .whenMatched().updateAll()
+    .whenNotMatched().insertAll()
+    .execute()
+}
+
+val deltaTablePokemonsIdentifier = DeltaTable.forName("PokemonIdentifier")
+
+def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
+  deltaTablePokemonsIdentifier.as("pokemonIdentifier")
+    .merge(
+      batchDF.as("updates"),
+      "pokemonIdentifier.Identifier = updates.Identifier AND pokemonIdentifier.Current = updates.Current")
+    .whenMatched().updateAll()
+    .whenNotMatched().insertAll()
+    .execute()
+}
+
+//We do our transformations and filters the pokemons
 val FilteredPokemons_df =  pokemons_df
     .select(
         $"Identifier"
@@ -189,38 +156,42 @@ val FilteredPokemons_df =  pokemons_df
        ,$"ValidTo"
        ,$"Current"
     )
-  .filter(
-      array_contains(col("Games"),"red") || array_contains(col("Games"),"blue") || array_contains(col("Games"),"leafgreen ")  || array_contains(col("Games"),"white ") );
-
-(FilteredPokemons_df
-       .writeStream.format("delta")
-       .option("trigger.once",true)
-       .option("checkpointLocation","FileStore/test/Pokemon_standardised")
-       .table("Pokemon")
-        )
 
 
 
 //We are also including our Name and ID data source, which would be subject to deletion if we needed to strip PII information from the data source.
 //As we are filtering our data on the Games entity, we simply use a join function on our hash value to filter our Identifier information table.
-val FilteredPokemonIdentifers_df =  pokemonIdentifier_df.join(FilteredPokemons_df,FilteredPokemons_df("Identifier") === pokemonIdentifier_df("Identifier"),"inner")
-    .select(
-        pokemonIdentifier_df("Identifier")
-      ,pokemonIdentifier_df("name")
+val FilteredpokemonIdentifier_df = pokemonIdentifier_df
+      .select(
+       pokemonIdentifier_df("Identifier")
       ,pokemonIdentifier_df("id")
+      ,pokemonIdentifier_df("name")
       ,pokemonIdentifier_df("ValidFrom")
       ,pokemonIdentifier_df("ValidTo")
       ,pokemonIdentifier_df("Current")
-    );
+    )
+    .withColumn("name",initcap(col("name")))
+    
 
-(FilteredPokemonIdentifers_df
-       .writeStream.format("delta")
-       .option("trigger.once",true)
-       .option("checkpointLocation","FileStore/test/Pokemon_Identifier_standardised")
-       .table("PokemonIdentifier")
-        )
+FilteredPokemons_df.writeStream
+  .format("delta")
+  .foreachBatch(upsertToPokemons _)
+  .outputMode("update")
+  .start()
+
+FilteredpokemonIdentifier_df.writeStream
+  .format("delta")
+  .foreachBatch(upsertToPokemonIdentifiers _)
+  .outputMode("update")
+  .start()
 
 
+
+// COMMAND ----------
+
+// MAGIC %sql
+// MAGIC select count(*) from Pokemon union all
+// MAGIC select count(*) from PokemonIdentifier
 
 // COMMAND ----------
 
@@ -230,16 +201,15 @@ val FilteredPokemonIdentifers_df =  pokemonIdentifier_df.join(FilteredPokemons_d
 
 // MAGIC %sql
 // MAGIC --Clean if need to rerun
-// MAGIC --drop table if exists SourcePokemonIdentifier;
-// MAGIC --drop table if exists SourcePokemons;
-// MAGIC --drop table if exists SourcePokemonIdentifier_temp;
-// MAGIC --drop table if exists SourcePokemons_temp;
+// MAGIC --drop table if exists sourcePokemon_Identifier;
+// MAGIC --drop table if exists sourcePokemon;
+// MAGIC --drop table if exists PokemonIdentifier;
+// MAGIC --drop table if exists Pokemon;
 
 // COMMAND ----------
 
 //Clean if need to rerun
-//dbutils.fs.rm("/FileStore/test/",true)
-
+//dbutils.fs.rm("/FileStore/Schema/",true)
 
 // COMMAND ----------
 
