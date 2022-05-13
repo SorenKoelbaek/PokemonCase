@@ -3,10 +3,11 @@
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql._
 import io.delta.tables._
+import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
 
 val Pokemon_df = spark.readStream.format("cloudFiles")
       .option("cloudFiles.format", "json")
-      .option("cloudFiles.schemaLocation","/FileStore/test/Pokemon")
+      .option("cloudFiles.schemaLocation","/FileStore/Schema/Pokemon")
       .option("cloudFiles.inferColumnTypes", "true")
       .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
       .load("/FileStore/raw/Pokemon/*/*.json")
@@ -16,7 +17,7 @@ val EffStart = current_timestamp()
 val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
 
 val pokemons_updates_df = Pokemon_df
-                           .withColumn("Identifier",sha2(col("name"),256))
+                           .withColumn("Identifier",sha2(col("id").cast(StringType),256))
                            .drop("name","id","species","forms")
                            .withColumn("ModifiedDate",EffStart)
                            .withColumn("ValidFrom",EffStart)
@@ -26,7 +27,7 @@ val pokemons_updates_df = Pokemon_df
 
 val Pokemons_identifier_df = Pokemon_df
                              .select("name","id","species","forms")
-                             .withColumn("Identifier",sha2(col("name"),256))  
+                             .withColumn("Identifier",sha2(col("id").cast(StringType),256))  
                              .withColumn("ModifiedDate",EffStart)
                              .withColumn("ValidFrom",EffStart)
                              .withColumn("ValidTo",lit(EffEnd))
@@ -161,6 +162,18 @@ Pokemons_identifier_df.writeStream
   .start()
 
 
+
+// COMMAND ----------
+
+// MAGIC %sql
+// MAGIC select count(*) from sourcePokemon
+// MAGIC union all
+// MAGIC select count(*) from sourcePokemon_Identifier
+
+// COMMAND ----------
+
+
+
 // COMMAND ----------
 
 //We do our Transformation between the bronze and Silver Layer, here we format and strip the information we need, while also adjusting our tables for the for the objects we need - we output to new database tables and maintain our logic for our SCD2.
@@ -180,8 +193,10 @@ val spark = SparkSession
 val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("SourcePokemon") //In order to get updated rows as well as new one
 val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("sourcePokemon_Identifier") //In order to get new rows!
 
-val deltaTablePokemons = DeltaTable.forName("Pokemon")
 
+
+val deltaTablePokemons = DeltaTable.forName("Pokemon")
+val deltaTablePokemonsIdentifier = DeltaTable.forName("PokemonIdentifier")
 
 //As we track our information in the bronze/extract layer, a change will always just have to be updated and new rows inserted
 def upsertToPokemons(batchDF: DataFrame, batchId: Long) {
@@ -194,7 +209,6 @@ def upsertToPokemons(batchDF: DataFrame, batchId: Long) {
     .execute()
 }
 
-val deltaTablePokemonsIdentifier = DeltaTable.forName("PokemonIdentifier")
 
 def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
   deltaTablePokemonsIdentifier.as("pokemonIdentifier")
@@ -205,7 +219,6 @@ def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
     .whenNotMatched().insertAll()
     .execute()
 } 
-
 
 
 
@@ -261,6 +274,28 @@ FilteredPokemons_df.writeStream
 
 
 
+
+
+
+// COMMAND ----------
+
+
+
+
+
+// COMMAND ----------
+
+//(FilteredPokemons_df.writeStream.format("delta")
+//       .option("trigger.once",true)
+//      .option("checkpointLocation","FileStore/Schema/Pokemon")
+//       .table("Pokemon")
+//        )
+// (FilteredpokemonIdentifier_df.writeStream.format("delta")
+//       .option("trigger.once",true)
+//       .option("checkpointLocation","FileStore/Schema/PokemonIdentifier")
+//       .table("PokemonIdentifier")
+//        )
+
 // COMMAND ----------
 
 //Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
@@ -282,6 +317,11 @@ FilteredPokemons_df.writeStream
 //dbutils.fs.rm("FileStore/Schema/PokemonIdentifier/",true)
 //dbutils.fs.rm("FileStore/Schema/Pokemon/",true)
 
+
+// COMMAND ----------
+
+// MAGIC %sql
+// MAGIC Select * from sourcepokemon
 
 // COMMAND ----------
 
