@@ -16,7 +16,6 @@ val EffStart = current_timestamp()
 val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
 
 val pokemons_updates_df = Pokemon_df
-                           .filter(array_contains(col("game_indices.version.name"),"red") || array_contains(col("game_indices.version.name"),"blue") || array_contains(col("game_indices.version.name"),"leafgreen")  || array_contains(col("game_indices.version.name"),"white"))
                            .withColumn("Identifier",sha2(col("name"),256))
                            .drop("name","id","species","forms")
                            .withColumn("ModifiedDate",EffStart)
@@ -26,7 +25,6 @@ val pokemons_updates_df = Pokemon_df
 
 
 val Pokemons_identifier_df = Pokemon_df
-                              .filter(array_contains(col("game_indices.version.name"),"red") || array_contains(col("game_indices.version.name"),"blue") || array_contains(col("game_indices.version.name"),"leafgreen")  || array_contains(col("game_indices.version.name"),"white"))
                              .select("name","id","species","forms")
                              .withColumn("Identifier",sha2(col("name"),256))  
                              .withColumn("ModifiedDate",EffStart)
@@ -213,6 +211,7 @@ def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
 
 //We do our transformations and filters the pokemons
 val FilteredPokemons_df =  pokemons_df
+                 .filter(array_contains(col("game_indices.version.name"),"red") || array_contains(col("game_indices.version.name"),"blue") || array_contains(col("game_indices.version.name"),"leafgreen")  || array_contains(col("game_indices.version.name"),"white"))
     .select(
         $"Identifier"
        ,$"base_experience"
@@ -266,7 +265,7 @@ FilteredPokemons_df.writeStream
 
 //Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
 
-//Define 
+//Define our dimensions and the fact table for the reporting
 
 // COMMAND ----------
 
