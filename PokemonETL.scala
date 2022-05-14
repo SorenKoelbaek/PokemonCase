@@ -5,6 +5,8 @@ import org.apache.spark.sql._
 import io.delta.tables._
 import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
 
+val Pseudonymisation = true
+
 val Pokemon_df = spark.readStream.format("cloudFiles")
       .option("cloudFiles.format", "json")
       .option("cloudFiles.schemaLocation","/FileStore/Schema/Pokemon")
@@ -27,6 +29,7 @@ val pokemons_updates_df = Pokemon_df
 
 val Pokemons_identifier_df = Pokemon_df
                              .select("name","id","species","forms")
+                             .withColumn("name",when(lit(Pseudonymisation) === "true","PokemonName").otherwise(col("name")))
                              .withColumn("Identifier",sha2(col("id").cast(StringType),256))  
                              .withColumn("ModifiedDate",EffStart)
                              .withColumn("ValidFrom",EffStart)
@@ -34,13 +37,16 @@ val Pokemons_identifier_df = Pokemon_df
                              .withColumn("Current",lit(true))
 
 
+
+
 val deltaTablePokemons = DeltaTable.forName("sourcePokemon")
 
+val deltaTablePokemons_identifier = DeltaTable.forName("sourcePokemon_Identifier")
 
 
 //We do a deltatable merge operation to ensure that matched pokemon, while new in the landingzone are only updated if their values differ. We also maintain our SCD2 rows here. we DO NOT mark missing as deleted.
+//We do not keep a record on deletion in our snapshot: 
 
-We do not keep a record on deletion in our snapshot: 
 def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
   
    val updateDF = streamBatchDF
@@ -102,7 +108,6 @@ def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
 }
 
 
-val deltaTablePokemons_identifier = DeltaTable.forName("sourcePokemon_Identifier")
 
 def upsertPokemonIdentifiersStream(streamBatchDF: DataFrame, batchId: Long) {
   
@@ -124,7 +129,13 @@ def upsertPokemonIdentifiersStream(streamBatchDF: DataFrame, batchId: Long) {
   .merge(
     combinedSCD2DF.as("updates"),
     "pokemons.Identifier = updates.mergeKey")
-  .whenMatched("pokemons.Current = true AND (pokemons.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms )")
+   .whenMatched("pokemons.name <> updates.name ")
+  .updateExpr(
+     Map(
+       "name" -> "updates.name",
+       "ModifiedDate" -> "updates.ModifiedDate",
+     ))
+   .whenMatched("pokemons.Current = true AND (pokemonIdentifier.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms )")
   .updateExpr(
      Map(
        "current" -> "false",
@@ -192,36 +203,8 @@ val spark = SparkSession
   .getOrCreate()
 
 
-val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("SourcePokemon") //In order to get updated rows as well as new one
-val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("sourcePokemon_Identifier") //In order to get new rows!
-
-
-
-val deltaTablePokemons = DeltaTable.forName("Pokemon")
-val deltaTablePokemonsIdentifier = DeltaTable.forName("PokemonIdentifier")
-
-//As we track our information in the bronze/extract layer, a change will always just have to be updated and new rows inserted
-def upsertToPokemons(batchDF: DataFrame, batchId: Long) {
-  deltaTablePokemons.as("pokemons")
-    .merge(
-      batchDF.as("updates"),
-      "pokemons.Identifier = updates.Identifier AND pokemons.ValidFrom = updates.ValidFrom")
-    .whenMatched().updateAll()
-    .whenNotMatched().insertAll()
-    .execute()
-}
-
-
-def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
-  deltaTablePokemonsIdentifier.as("pokemonIdentifier")
-    .merge(
-      batchDF.as("updates"),
-      "pokemonIdentifier.Identifier = updates.Identifier AND pokemonIdentifier.ValidFrom = updates.ValidFrom")
-    .whenMatched().updateAll()
-    .whenNotMatched().insertAll()
-    .execute()
-} 
-
+val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("SourcePokemon")
+val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("sourcePokemon_Identifier")
 
 
 //We do our transformations and filters the pokemons
@@ -260,6 +243,30 @@ val FilteredpokemonIdentifier_df = pokemonIdentifier_df
     
 
 
+val deltaTablePokemons = DeltaTable.forName("Pokemon")
+val deltaTablePokemonsIdentifier = DeltaTable.forName("PokemonIdentifier")
+
+//As we track our information in the bronze/extract layer, a change will always just have to be updated and new rows inserted
+def upsertToPokemons(batchDF: DataFrame, batchId: Long) {
+  deltaTablePokemons.as("pokemons")
+    .merge(
+      batchDF.as("updates"),
+      "pokemons.Identifier = updates.Identifier AND pokemons.ValidFrom = updates.ValidFrom")
+    .whenMatched().updateAll()
+    .whenNotMatched().insertAll()
+    .execute()
+}
+
+
+def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
+  deltaTablePokemonsIdentifier.as("pokemonIdentifier")
+    .merge(
+      batchDF.as("updates"),
+      "pokemonIdentifier.Identifier = updates.Identifier AND pokemonIdentifier.ValidFrom = updates.ValidFrom")
+    .whenMatched().updateAll()
+    .whenNotMatched().insertAll()
+    .execute()
+} 
 
 
 FilteredPokemons_df.writeStream
@@ -278,17 +285,13 @@ FilteredPokemons_df.writeStream
 
 
 
-
 // COMMAND ----------
 
 //Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
 
 //Define our dimensions and the fact table for the reporting
-
-// COMMAND ----------
-
-
-
+//The key part here is that we generate an ID for matching the dim and fact object, as our dimension includes SCD2, we need to make sure to match these correctly
+//We should be able to generate a unique key by a combination of the Identifier column alongside either Current or ValidFrom as these will be unique in combination.
 
 
 // COMMAND ----------
@@ -319,11 +322,6 @@ FilteredPokemons_df.writeStream
 //dbutils.fs.rm("FileStore/Schema/PokemonIdentifier/",true)
 //dbutils.fs.rm("FileStore/Schema/Pokemon/",true)
 
-
-// COMMAND ----------
-
-// MAGIC %sql
-// MAGIC Select * from sourcepokemon
 
 // COMMAND ----------
 
