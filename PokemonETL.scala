@@ -327,6 +327,7 @@ FilteredPokemons_df.writeStream
 // MAGIC --drop table if Exists dimPicture;
 // MAGIC --drop table if Exists factPokemon;
 // MAGIC 
+// MAGIC 
 // MAGIC Create table if not exists dimIdentity
 // MAGIC (
 // MAGIC   IdentityID bigint GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
@@ -371,10 +372,6 @@ FilteredPokemons_df.writeStream
 // COMMAND ----------
 
 //Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
-
-//Define our dimensions and the fact table for the reporting
-//The key part here is that we generate an ID for matching the dim and fact object, as our dimension includes SCD2, we need to make sure to match these correctly
-//We should be able to generate a unique key by a combination of the Identifier column alongside either Current or ValidFrom as these will be unique in combination.
 
 val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("Pokemon") //We use ignorechanges to make sure we get updated rows downstream
 val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("PokemonIdentifier") //We use ignorechanges to make sure we get updated rows downstream
@@ -442,7 +439,7 @@ def UpsertDimType(batchDF: DataFrame, batchId: Long) {
   deltadimType.as("dim")
     .merge(
       batchDF.as("updates"),
-      "dim.Type1 = updates.Type1 AND dim.Type2 = updates.Type2")
+      $"dim.Type1" === $"updates.Type1" && when($"dim.Type2".isNull,"NAN").otherwise($"dim.Type2") === when($"updates.Type2".isNull,"NAN").otherwise($"updates.Type2"))
     .whenNotMatched()
     .insertExpr(
      Map(
@@ -515,10 +512,10 @@ def LoadPokemon(batchDF: DataFrame, batchId: Long) {
 
 val FactBatch = batchDF
        .as("fact")
-      .join(deltadimType.toDF.as("Type"),$"fact.Type1" === $"Type.Type1" && $"fact.Type2" === $"Type.Type2")
+      .join(deltadimType.toDF.as("Type"),$"fact.Type1" === $"Type.Type1" && when($"fact.Type2".isNull,"NAN").otherwise($"fact.Type2") === when($"Type.Type2".isNull,"NAN").otherwise($"Type.Type2"))
       .join(deltadimPicture.toDF.as("Picture"),$"fact.PokemonPicture" === $"Picture.PokemonPicture")
-      .join(deltadimIdentity.toDF.as("Identity"),$"fact.Identifier" === $"Identity.Identifier" && $"fact.ValidFrom" >= $"Identity.IdentityValidFrom" && $"fact.ValidFrom" < $"Identity.IdentityValidTo")
-  .selectExpr("fact.Identifier","fact.Height","fact.Weight","fact.Order","fact.BMI","fact.Base_Experience","fact.ValidFrom","fact.ValidTo","fact.IsCurrent","Type.TypeID","Picture.PictureID","Identity.IdentityID")
+      .join(deltadimIdentity.toDF.as("Identity"),$"fact.Identifier" === $"Identity.Identifier" && $"fact.ValidFrom" >= $"Identity.IdentityValidFrom" && $"fact.ValidFrom" <= $"Identity.IdentityValidTo")
+.selectExpr("fact.Identifier","fact.Height","fact.Weight","fact.Order","fact.BMI","fact.Base_Experience","fact.ValidFrom","fact.ValidTo","fact.IsCurrent","Type.TypeID","Picture.PictureID","Identity.IdentityID")
 
 
 
@@ -539,14 +536,5 @@ factPokemon_df.writeStream
     .start()
 
           
-
-
-
-// COMMAND ----------
-
-val df = spark.sql("select * from factPokemon where IdentityID = 60")
-display(df)
-
-// COMMAND ----------
 
 
