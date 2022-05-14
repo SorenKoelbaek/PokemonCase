@@ -119,7 +119,6 @@ val Pokemons_df = spark.read.json(pokemons_ds)
 
 
   Pokemons_df
-    //.withColumn("height",lit(1000))
     .withColumn("current_timestamp",current_timestamp())
     .write.mode("overwrite")
     .partitionBy("current_timestamp")
@@ -131,8 +130,7 @@ val Pokemons_df = spark.read.json(pokemons_ds)
 
 // COMMAND ----------
 
-
-
+//dbutils.fs.rm("FileStore/raw/",true)
 
 // COMMAND ----------
 
