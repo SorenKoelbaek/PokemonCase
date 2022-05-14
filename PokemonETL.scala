@@ -5,7 +5,7 @@ import org.apache.spark.sql._
 import io.delta.tables._
 import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
 
-val Pseudonymisation = true
+val Pseudonymisation = true //This will convert the name of the pokemon to "PokemonName". A change to the "name" will be seen "downstream" as a back-in-time change and will conform to SCD1 instead of SCD2
 
 val Pokemon_df = spark.readStream.format("cloudFiles")
       .option("cloudFiles.format", "json")
@@ -20,7 +20,7 @@ val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
 
 val pokemons_updates_df = Pokemon_df
                            .withColumn("Identifier",sha2(col("id").cast(StringType),256))
-                           .drop("name","id","species","forms")
+                           .drop("name","id","species","forms") //We exclude the columns defines as PII
                            .withColumn("ModifiedDate",EffStart)
                            .withColumn("ValidFrom",EffStart)
                            .withColumn("ValidTo",lit(EffEnd))
@@ -30,6 +30,9 @@ val pokemons_updates_df = Pokemon_df
 val Pokemons_identifier_df = Pokemon_df
                              .select("name","id","species","forms")
                              .withColumn("name",when(lit(Pseudonymisation) === "true","PokemonName").otherwise(col("name")))
+                             .withColumn("id",when(lit(Pseudonymisation) === "true",null).otherwise(col("id")))
+                             .withColumn("species",when(lit(Pseudonymisation) === "true",null).otherwise(col("species")))
+                             .withColumn("forms",when(lit(Pseudonymisation) === "true",null).otherwise(col("forms")))
                              .withColumn("Identifier",sha2(col("id").cast(StringType),256))  
                              .withColumn("ModifiedDate",EffStart)
                              .withColumn("ValidFrom",EffStart)
@@ -129,10 +132,13 @@ def upsertPokemonIdentifiersStream(streamBatchDF: DataFrame, batchId: Long) {
   .merge(
     combinedSCD2DF.as("updates"),
     "pokemons.Identifier = updates.mergeKey")
-   .whenMatched("pokemons.name <> updates.name ")
+   .whenMatched("pokemons.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms" )
   .updateExpr(
      Map(
        "name" -> "updates.name",
+       "id" -> "updates.id",
+       "species" -> "updates.species",
+       "forms" -> "updates.forms",
        "ModifiedDate" -> "updates.ModifiedDate",
      ))
    .whenMatched("pokemons.Current = true AND (pokemonIdentifier.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms )")
