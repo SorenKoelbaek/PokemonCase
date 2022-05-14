@@ -5,6 +5,8 @@ import org.apache.spark.sql._
 import io.delta.tables._
 import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
 
+val Pseudonymisation = false //This will convert the name of the pokemon to "PokemonName". A change to the "name" will be seen "downstream" as a back-in-time change and will conform to SCD1 instead of SCD2
+
 val Pokemon_df = spark.readStream.format("cloudFiles")
       .option("cloudFiles.format", "json")
       .option("cloudFiles.schemaLocation","/FileStore/Schema/Pokemon")
@@ -18,29 +20,38 @@ val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
 
 val pokemons_updates_df = Pokemon_df
                            .withColumn("Identifier",sha2(col("id").cast(StringType),256))
-                           .drop("name","id","species","forms")
+                           .drop("name","id","species","forms") //We exclude the columns defines as PII
                            .withColumn("ModifiedDate",EffStart)
-                           .withColumn("ValidFrom",EffStart)
+                           .withColumn("ValidFrom",to_timestamp(regexp_replace($"current_timestamp","%3A",":"),"yyyy-MM-dd HH:mm:ss.SSS"))
                            .withColumn("ValidTo",lit(EffEnd))
                            .withColumn("Current",lit(true))
+                           
+                            
+
 
 
 val Pokemons_identifier_df = Pokemon_df
-                             .select("name","id","species","forms")
+                             .withColumn("ValidFrom",to_timestamp(regexp_replace($"current_timestamp","%3A",":"),"yyyy-MM-dd HH:mm:ss.SSS"))
+                             .select("name","id","species","forms","ValidFrom")
                              .withColumn("Identifier",sha2(col("id").cast(StringType),256))  
+                             .withColumn("name",when(lit(Pseudonymisation) === "true","PokemonName").otherwise(col("name")))
+                             .withColumn("id",when(lit(Pseudonymisation) === "true",null).otherwise(col("id")))
+                             .withColumn("species",when(lit(Pseudonymisation) === "true",null).otherwise(col("species")))
+                             .withColumn("forms",when(lit(Pseudonymisation) === "true",null).otherwise(col("forms")))
                              .withColumn("ModifiedDate",EffStart)
-                             .withColumn("ValidFrom",EffStart)
                              .withColumn("ValidTo",lit(EffEnd))
                              .withColumn("Current",lit(true))
+                                         
 
 
 val deltaTablePokemons = DeltaTable.forName("sourcePokemon")
 
+val deltaTablePokemons_identifier = DeltaTable.forName("sourcePokemon_Identifier")
 
 
 //We do a deltatable merge operation to ensure that matched pokemon, while new in the landingzone are only updated if their values differ. We also maintain our SCD2 rows here. we DO NOT mark missing as deleted.
+//We do not keep a record on deletion in our snapshot: 
 
-We do not keep a record on deletion in our snapshot: 
 def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
   
    val updateDF = streamBatchDF
@@ -88,7 +99,6 @@ def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
       "stats" -> "updates.stats",
       "types" -> "updates.types",
       "weight" -> "updates.weight",
-      "date" -> "updates.date",
       "_rescued_data" -> "updates._rescued_data",
       "ModifiedDate" -> "updates.ModifiedDate",
       "current_timestamp" -> "updates.current_timestamp",
@@ -102,9 +112,42 @@ def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
 }
 
 
-val deltaTablePokemons_identifier = DeltaTable.forName("sourcePokemon_Identifier")
 
-def upsertPokemonIdentifiersStream(streamBatchDF: DataFrame, batchId: Long) {
+def upsertPokemonIdentifiersStreamSCD1(streamBatchDF: DataFrame, batchId: Long) {
+  
+  deltaTablePokemons_identifier
+  .as("pokemons")
+  .merge(
+    streamBatchDF.as("updates"),
+    "pokemons.Identifier = updates.Identifier")
+   .whenMatched("pokemons.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms" )
+  .updateExpr(
+     Map(
+       "name" -> "updates.name",
+       "id" -> "updates.id",
+       "species" -> "updates.species",
+       "forms" -> "updates.forms",
+       "ModifiedDate" -> "updates.ModifiedDate",
+     ))
+  .whenNotMatched()
+  .insertExpr(
+    Map(
+      "Identifier" -> "updates.Identifier",
+      "name" -> "updates.name",
+      "id" -> "updates.id",
+      "forms" -> "updates.forms",
+      "species" -> "updates.species",
+      "Current" -> "updates.Current",
+      "ValidFrom" -> "updates.ValidFrom",
+      "ValidTo" -> "updates.ValidTo",
+      "ModifiedDate" -> "updates.ModifiedDate"
+    )
+  )
+  .execute()
+}
+
+
+def upsertPokemonIdentifiersStreamSCD2(streamBatchDF: DataFrame, batchId: Long) {
   
   val updateDF = streamBatchDF
     .as("updates")
@@ -118,13 +161,12 @@ def upsertPokemonIdentifiersStream(streamBatchDF: DataFrame, batchId: Long) {
         streamBatchDF.withColumn("Mergekey",col("Identifier"))
     )
     
-  
   deltaTablePokemons_identifier
   .as("pokemons")
   .merge(
     combinedSCD2DF.as("updates"),
     "pokemons.Identifier = updates.mergeKey")
-  .whenMatched("pokemons.Current = true AND (pokemons.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms )")
+   .whenMatched("pokemons.Current = true AND (pokemons.name <> updates.name or pokemons.id <> updates.id or pokemons.species <> updates.species or pokemons.forms <> updates.forms )")
   .updateExpr(
      Map(
        "current" -> "false",
@@ -157,22 +199,26 @@ pokemons_updates_df.writeStream
   .outputMode("update")
   .start()
 
+
+//Depending on on our Pseudonymisation-state we either use the SCD1 or SCD2 method defined above
+if( Pseudonymisation ){
 Pokemons_identifier_df.writeStream
   .format("delta")
-  .foreachBatch(upsertPokemonIdentifiersStream _)
+  .foreachBatch(upsertPokemonIdentifiersStreamSCD1 _)
   .outputMode("update")
   .start()
 
+} else{
+Pokemons_identifier_df.writeStream
+  .format("delta")
+  .foreachBatch(upsertPokemonIdentifiersStreamSCD2 _)
+  .outputMode("update")
+  .start()
+
+}
 
 
-// COMMAND ----------
 
-// MAGIC %sql
-// MAGIC select count(*) from sourcePokemon
-// MAGIC union all
-// MAGIC select count(*) from sourcePokemon_Identifier
-
-// COMMAND ----------
 
 
 
@@ -192,36 +238,8 @@ val spark = SparkSession
   .getOrCreate()
 
 
-val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("SourcePokemon") //In order to get updated rows as well as new one
-val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("sourcePokemon_Identifier") //In order to get new rows!
-
-
-
-val deltaTablePokemons = DeltaTable.forName("Pokemon")
-val deltaTablePokemonsIdentifier = DeltaTable.forName("PokemonIdentifier")
-
-//As we track our information in the bronze/extract layer, a change will always just have to be updated and new rows inserted
-def upsertToPokemons(batchDF: DataFrame, batchId: Long) {
-  deltaTablePokemons.as("pokemons")
-    .merge(
-      batchDF.as("updates"),
-      "pokemons.Identifier = updates.Identifier AND pokemons.ValidFrom = updates.ValidFrom")
-    .whenMatched().updateAll()
-    .whenNotMatched().insertAll()
-    .execute()
-}
-
-
-def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
-  deltaTablePokemonsIdentifier.as("pokemonIdentifier")
-    .merge(
-      batchDF.as("updates"),
-      "pokemonIdentifier.Identifier = updates.Identifier AND pokemonIdentifier.ValidFrom = updates.ValidFrom")
-    .whenMatched().updateAll()
-    .whenNotMatched().insertAll()
-    .execute()
-} 
-
+val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("SourcePokemon") //We use ignorechanges to make sure we get updated rows downstream
+val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("sourcePokemon_Identifier") //We use ignorechanges to make sure we get updated rows downstream
 
 
 //We do our transformations and filters the pokemons
@@ -261,6 +279,31 @@ val FilteredpokemonIdentifier_df = pokemonIdentifier_df
 
 
 
+val deltaTablePokemons = DeltaTable.forName("Pokemon")
+val deltaTablePokemonsIdentifier = DeltaTable.forName("PokemonIdentifier")
+
+//As we track our information in the bronze/extract layer, a change will always just have to be updated and new rows inserted
+def upsertToPokemons(batchDF: DataFrame, batchId: Long) {
+  deltaTablePokemons.as("pokemons")
+    .merge(
+      batchDF.as("updates"),
+      "pokemons.Identifier = updates.Identifier AND pokemons.ValidFrom = updates.ValidFrom")
+    .whenMatched().updateAll()
+    .whenNotMatched().insertAll()
+    .execute()
+}
+
+
+def upsertToPokemonIdentifiers(batchDF: DataFrame, batchId: Long) {
+  deltaTablePokemonsIdentifier.as("pokemonIdentifier")
+    .merge(
+      batchDF.as("updates"),
+      "pokemonIdentifier.Identifier = updates.Identifier AND pokemonIdentifier.ValidFrom = updates.ValidFrom")
+    .whenMatched().updateAll()
+    .whenNotMatched().insertAll()
+    .execute()
+} 
+
 
 FilteredPokemons_df.writeStream
     .format("delta")
@@ -276,54 +319,233 @@ FilteredPokemons_df.writeStream
 
 
 
+// COMMAND ----------
 
-
+// MAGIC %sql
+// MAGIC --drop table if Exists dimIdentity;
+// MAGIC --drop table if Exists dimType;
+// MAGIC --drop table if Exists dimPicture;
+// MAGIC --drop table if Exists factPokemon;
+// MAGIC 
+// MAGIC Create table if not exists dimIdentity
+// MAGIC (
+// MAGIC   IdentityID bigint GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
+// MAGIC   Name string,
+// MAGIC   Id int,
+// MAGIC   Identifier string,
+// MAGIC   IdentityValidFrom timestamp,
+// MAGIC   IdentityValidTo timestamp,
+// MAGIC   IsCurrent boolean
+// MAGIC );
+// MAGIC 
+// MAGIC Create table if not exists dimType
+// MAGIC (
+// MAGIC   TypeID bigint GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
+// MAGIC   Type1 string,
+// MAGIC   Type2 string
+// MAGIC 
+// MAGIC );
+// MAGIC Create table if not exists dimPicture
+// MAGIC (
+// MAGIC   PictureID bigint GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
+// MAGIC   PokemonPicture string
+// MAGIC );
+// MAGIC 
+// MAGIC 
+// MAGIC Create table if not exists factPokemon
+// MAGIC (
+// MAGIC   Identifier string,
+// MAGIC   IdentityID bigint,
+// MAGIC   PictureID bigint,
+// MAGIC   TypeID bigint,
+// MAGIC   BMI decimal,
+// MAGIC   Weight int,
+// MAGIC   Height int,
+// MAGIC   Order int,
+// MAGIC   Base_Experience int,
+// MAGIC   ValidFrom timestamp,
+// MAGIC   ValidTo timestamp,
+// MAGIC   IsCurrent boolean
+// MAGIC )
 
 // COMMAND ----------
 
 //Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
 
 //Define our dimensions and the fact table for the reporting
+//The key part here is that we generate an ID for matching the dim and fact object, as our dimension includes SCD2, we need to make sure to match these correctly
+//We should be able to generate a unique key by a combination of the Identifier column alongside either Current or ValidFrom as these will be unique in combination.
+
+val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("Pokemon") //We use ignorechanges to make sure we get updated rows downstream
+val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("PokemonIdentifier") //We use ignorechanges to make sure we get updated rows downstream
+
+
+//Create the Identity Dimension and write that to the delta-table.
+val dimIdentity_df = pokemonIdentifier_df
+    .select(
+    col("name").as("Name"),
+    col("id").as("Id"),
+    col("Identifier"),
+    col("ValidFrom").as("IdentityValidFrom"),
+    col("ValidTo").as("IdentityValidTo"),
+    col("Current").as("IsCurrent"))
+
+
+val deltadimIdentity = DeltaTable.forName("dimIdentity")
+
+def UpsertDimIdentity(batchDF: DataFrame, batchId: Long) {
+  deltadimIdentity.as("dim")
+    .merge(
+      batchDF.as("updates"),
+      "dim.Identifier = updates.Identifier AND dim.IdentityValidFrom = updates.IdentityValidFrom")
+    .whenMatched()
+     .updateExpr(
+     Map(
+       "Name" -> "updates.Name",
+       "Id" -> "updates.Id",
+       "IdentityValidTo" -> "updates.IdentityValidTo",
+       "IsCurrent" -> "updates.IsCurrent"
+     ))
+    .whenNotMatched()
+    .insertExpr(
+     Map(
+       "Name" -> "updates.Name",
+       "Id" -> "updates.Id",
+       "Identifier" -> "updates.Identifier",
+       "IdentityValidFrom" -> "updates.IdentityValidFrom",
+       "IdentityValidTo" -> "updates.IdentityValidTo",
+       "IsCurrent" -> "updates.IsCurrent"
+     ))
+    .execute()
+} 
+
+
+dimIdentity_df.writeStream
+    .format("delta")
+    .foreachBatch(UpsertDimIdentity _)
+    .outputMode("update")
+    .start()
+
+
+
+//Create the Type Dimension and write that to the delta-table.
+val dimType_df = pokemons_df
+        .select(
+        col("Type1"),
+        col("Type2"))
+        .distinct()
+
+val deltadimType= DeltaTable.forName("dimType")
+
+def UpsertDimType(batchDF: DataFrame, batchId: Long) {
+
+  deltadimType.as("dim")
+    .merge(
+      batchDF.as("updates"),
+      "dim.Type1 = updates.Type1 AND dim.Type2 = updates.Type2")
+    .whenNotMatched()
+    .insertExpr(
+     Map(
+       "Type1" -> "updates.Type1",
+       "Type2" -> "updates.Type2"
+     ))
+    .execute()
+} 
+
+
+dimType_df.writeStream
+    .format("delta")
+    .foreachBatch(UpsertDimType _)
+    .outputMode("update")
+    .start()
+
+//Create the Picture Dimension and write that to the delta-table.
+val dimPicture_df = pokemons_df
+        .select(
+        col("front_default").as("PokemonPicture"))
+        .distinct()
+
+val deltadimPicture= DeltaTable.forName("dimPicture")
+
+def UpsertDimPicture(batchDF: DataFrame, batchId: Long) {
+ deltadimPicture.as("dim")
+    .merge(
+      batchDF.as("updates"),
+      "dim.PokemonPicture = updates.PokemonPicture")
+    .whenNotMatched()
+    .insertExpr(
+     Map(
+       "PokemonPicture" -> "updates.PokemonPicture"
+     ))
+    .execute()
+} 
+
+
+dimPicture_df.writeStream
+    .format("delta")
+    .foreachBatch(UpsertDimPicture _)
+    .outputMode("update")
+    .start()
+
+
+//Create the Fact object and write that to the delta-table.
+
+val factPokemon_df = pokemons_df
+                .select(
+                  col("Type1"),
+                  col("Type2"),
+                  col("front_default").as("PokemonPicture"),
+                  col("Identifier"),
+                  col("height").as("Height"),
+                  col("weight").as("Weight"),
+                  col("order").as("Order"),
+                  col("BMI"),
+                  col("base_experience").as("Base_Experience"),
+                  col("ValidFrom").as("ValidFrom"),
+                  col("ValidTo").as("ValidTo"),
+                  col("Current").as("IsCurrent"))
+
+
+          
+          
+val deltafact= DeltaTable.forName("factPokemon")
+
+def LoadPokemon(batchDF: DataFrame, batchId: Long) {
+
+
+val FactBatch = batchDF
+       .as("fact")
+      .join(deltadimType.toDF.as("Type"),$"fact.Type1" === $"Type.Type1" && $"fact.Type2" === $"Type.Type2")
+      .join(deltadimPicture.toDF.as("Picture"),$"fact.PokemonPicture" === $"Picture.PokemonPicture")
+      .join(deltadimIdentity.toDF.as("Identity"),$"fact.Identifier" === $"Identity.Identifier" && $"fact.ValidFrom" >= $"Identity.IdentityValidFrom" && $"fact.ValidFrom" < $"Identity.IdentityValidTo")
+  .selectExpr("fact.Identifier","fact.Height","fact.Weight","fact.Order","fact.BMI","fact.Base_Experience","fact.ValidFrom","fact.ValidTo","fact.IsCurrent","Type.TypeID","Picture.PictureID","Identity.IdentityID")
+
+
+
+  deltafact.as("fact")
+    .merge(
+      FactBatch.as("updates"),
+      "fact.Identifier = updates.Identifier AND fact.ValidFrom = updates.ValidFrom")
+    .whenMatched().updateAll()
+    .whenNotMatched().insertAll()
+    .execute()
+} 
+
+
+factPokemon_df.writeStream
+    .format("delta")
+    .foreachBatch(LoadPokemon _)
+    .outputMode("update")
+    .start()
+
+          
+
+
 
 // COMMAND ----------
 
-
-
-
-
-// COMMAND ----------
-
-//(FilteredPokemons_df.writeStream.format("delta")
-//       .option("trigger.once",true)
-//      .option("checkpointLocation","FileStore/Schema/Pokemon")
-//       .table("Pokemon")
-//        )
-// (FilteredpokemonIdentifier_df.writeStream.format("delta")
-//       .option("trigger.once",true)
-//       .option("checkpointLocation","FileStore/Schema/PokemonIdentifier")
-//       .table("PokemonIdentifier")
-//        )
-
-// COMMAND ----------
-
-// MAGIC %sql
-// MAGIC --Clean if need to rerun
-// MAGIC --drop table if exists sourcePokemon_Identifier;
-// MAGIC --drop table if exists sourcePokemon;
-// MAGIC --drop table if exists PokemonIdentifier;
-// MAGIC --drop table if exists Pokemon;
-
-// COMMAND ----------
-
-//Clean if need to rerun
-//dbutils.fs.rm("FileStore/Schema/PokemonIdentifier/",true)
-//dbutils.fs.rm("FileStore/Schema/Pokemon/",true)
-
-
-// COMMAND ----------
-
-// MAGIC %sql
-// MAGIC Select * from sourcepokemon
+val df = spark.sql("select * from factPokemon where IdentityID = 60")
+display(df)
 
 // COMMAND ----------
 
