@@ -29,8 +29,8 @@ val Pokemon_df = spark.readStream.format("cloudFiles")
 //we add a ValidFrom and ValidTo values to our database tables
 val Modified = current_timestamp()
 val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
-case class Pseudo(name: String, url: String)
 
+case class Pseudo(name: String, url: String)
 var Species = pseudo("PokemonSpecies","PokemonSpecies")
 
 val Forms: Array[pseudo] = Array(
@@ -60,14 +60,14 @@ val Pokemons_identifier_df = Pokemon_df
                              .withColumn("Current",lit(true))
 
 
-val deltaTablePokemons = DeltaTable.forName("sourcePokemon")
 
+
+val deltaTablePokemons = DeltaTable.forName("sourcePokemon")
 val deltaTablePokemons_identifier = DeltaTable.forName("sourcePokemon_Identifier")
 
 
 //We do a deltatable merge operation to ensure that matched pokemon, while new in the landingzone are only updated if their values differ. We also maintain our SCD2 rows here. we DO NOT mark missing as deleted.
 //We do not keep a record on deletion in our snapshot: 
-
 def upsertPokemonStream(streamBatchDF: DataFrame, batchId: Long) {
   
    val updateDF = streamBatchDF
@@ -267,7 +267,7 @@ val FilteredPokemons_df =  pokemons_df
        ,$"order"
        ,$"weight"
        ,$"height"
-       ,(($"weight"*10)/($"height"*10)).as("BMI")
+       ,(($"weight"*10)/($"height"*10)*($"height"*10)).as("BMI")
        ,($"types.type.name")(0).as("Type1")
        ,($"types.type.name")(1).as("Type2")
        ,$"sprites.front_default"
