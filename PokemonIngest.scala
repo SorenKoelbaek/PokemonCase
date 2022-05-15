@@ -1,4 +1,11 @@
 // Databricks notebook source
+// MAGIC %md # Ingestion Notebook
+// MAGIC ### This notebook consists of two steps:
+// MAGIC 1. First we build a list of pokemon URLS by asking the REST api endpoint **_Pokemon_**, we check the _next_ response for the next URL and continue until there is no next page. We build a listobject of individual Pokemon object URLS:
+// MAGIC 2. Then we loop through the URLS, and append the response string to an object, which we lastly save into our storage Landingzone as a json file partitioned by _Current_Timestamp()_ -- as we rely on the DBFS filesystem to partition the json output as it wants
+
+// COMMAND ----------
+
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{col, udf, from_json, explode, sha2}
 import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
@@ -13,22 +20,8 @@ val spark = SparkSession
   .getOrCreate()
 
 
-//We define the schema of our iterator requests; adding the object array to our schema object.
-val PokemonIteraterObject = (new StructType)
-        .add("name", StringType)
-        .add("url", StringType)
-
-val pokemonIteraterResults = new ArrayType(PokemonIteraterObject, false)
-
-val PokemonIteraterSchema: StructType = (new StructType)
-  .add("results", pokemonIteraterResults)
-  .add("next", StringType)
-
-
-
 //We are doing a lazy while loop to iterate over the default API Pagination
 //checking the next value and extracting the default (20) pokemons at each request.
-  // --> this would benefit of a recursive function instead; change if time allows.
 var uri = "https://pokeapi.co/api/v2/pokemon";
 var hasnext = true;
 
@@ -106,6 +99,7 @@ import java.time.Instant
 
 val LandinDir = "/FileStore/raw/Pokemon/"
 
+//We use a listbuffer as it is immutable and we can add our JSON response to the list for each URL.
 var responseList = new scala.collection.mutable.ListBuffer[String]()
 
 for (PokeUrl <- pokemonURLlist )
@@ -114,23 +108,21 @@ for (PokeUrl <- pokemonURLlist )
     responseList += httpRequest.ExecuteHttpGet(PokeUrl)                              
 }
 
+//We collect the dataframe from the list of JSON responses
 val pokemons_ds = responseList.toDS()
 val Pokemons_df = spark.read.json(pokemons_ds)
 
-
+//Save out the Dataframe to our DBFS
   Pokemons_df
+    //.withColumn("height",lit(100)) //Test to demonstrate SCD2 downstream
     .withColumn("current_timestamp",current_timestamp())
-    .write.mode("overwrite")
+    .write.mode("append")
     .partitionBy("current_timestamp")
     .format("json")
     .save(LandinDir);
   
 
 
-
-// COMMAND ----------
-
-//dbutils.fs.rm("FileStore/raw/",true)
 
 // COMMAND ----------
 
