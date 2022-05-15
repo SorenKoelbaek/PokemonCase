@@ -280,7 +280,6 @@ val FilteredPokemons_df =  pokemons_df
 
 
 //We are also including our Name and ID data source, which would be subject to deletion if we needed to strip PII information from the data source.
-//As we are filtering our data on the Games entity, we simply use a join function on our hash value to filter our Identifier information table.
 val FilteredpokemonIdentifier_df = pokemonIdentifier_df
       .select(
        pokemonIdentifier_df("Identifier")
