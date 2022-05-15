@@ -27,13 +27,20 @@ val Pokemon_df = spark.readStream.format("cloudFiles")
       .load("/FileStore/raw/Pokemon/*/*.json")
 
 //we add a ValidFrom and ValidTo values to our database tables
-val EffStart = current_timestamp()
+val Modified = current_timestamp()
 val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
+case class Pseudo(name: String, url: String)
+
+var Species = pseudo("PokemonSpecies","PokemonSpecies")
+
+val Forms: Array[pseudo] = Array(
+    pseudo("PokemonForms","PokemonForms")
+)
 
 val pokemons_updates_df = Pokemon_df
                            .withColumn("Identifier",sha2(col("id").cast(StringType),256))
                            .drop("name","id","species","forms") //We exclude the columns defines as PII
-                           .withColumn("ModifiedDate",EffStart)
+                           .withColumn("ModifiedDate",Modified)
                            .withColumn("ValidFrom",to_timestamp(regexp_replace($"current_timestamp","%3A",":"),"yyyy-MM-dd HH:mm:ss.SSS"))
                            .withColumn("ValidTo",lit(EffEnd))
                            .withColumn("Current",lit(true))
@@ -46,9 +53,9 @@ val Pokemons_identifier_df = Pokemon_df
                              .withColumn("Identifier",sha2(col("id").cast(StringType),256))  
                              .withColumn("name",when(lit(Pseudonymisation) === "true","PokemonName").otherwise(col("name")))
                              .withColumn("id",when(lit(Pseudonymisation) === "true",0).otherwise(col("id")))
-                             //.withColumn("species",when(lit(Pseudonymisation) === "true",emptySpecies).otherwise(col("species")))
-                             //.withColumn("forms",when(lit(Pseudonymisation) === "true",Emptyforms).otherwise(col("forms")))
-                             .withColumn("ModifiedDate",EffStart)
+                             .withColumn("species",when(lit(Pseudonymisation) === "true",typedLit(Species)).otherwise(col("species")))
+                             .withColumn("forms",when(lit(Pseudonymisation) === "true",typedLit(Forms)).otherwise(col("forms")))
+                             .withColumn("ModifiedDate",Modified)
                              .withColumn("ValidTo",lit(EffEnd))
                              .withColumn("Current",lit(true))
 
@@ -327,56 +334,6 @@ FilteredPokemons_df.writeStream
     .start()
 
 
-
-// COMMAND ----------
-
-// MAGIC %sql
-// MAGIC --drop table if Exists dimIdentity;
-// MAGIC --drop table if Exists dimType;
-// MAGIC --drop table if Exists dimPicture;
-// MAGIC --drop table if Exists factPokemon;
-// MAGIC 
-// MAGIC 
-// MAGIC Create table if not exists dimIdentity
-// MAGIC (
-// MAGIC   IdentityID bigint GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
-// MAGIC   Name string,
-// MAGIC   Id int,
-// MAGIC   Identifier string,
-// MAGIC   IdentityValidFrom timestamp,
-// MAGIC   IdentityValidTo timestamp,
-// MAGIC   IsCurrent boolean
-// MAGIC );
-// MAGIC 
-// MAGIC Create table if not exists dimType
-// MAGIC (
-// MAGIC   TypeID bigint GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
-// MAGIC   Type1 string,
-// MAGIC   Type2 string
-// MAGIC 
-// MAGIC );
-// MAGIC Create table if not exists dimPicture
-// MAGIC (
-// MAGIC   PictureID bigint GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
-// MAGIC   PokemonPicture string
-// MAGIC );
-// MAGIC 
-// MAGIC 
-// MAGIC Create table if not exists factPokemon
-// MAGIC (
-// MAGIC   Identifier string,
-// MAGIC   IdentityID bigint,
-// MAGIC   PictureID bigint,
-// MAGIC   TypeID bigint,
-// MAGIC   BMI decimal,
-// MAGIC   Weight int,
-// MAGIC   Height int,
-// MAGIC   Order int,
-// MAGIC   Base_Experience int,
-// MAGIC   ValidFrom timestamp,
-// MAGIC   ValidTo timestamp,
-// MAGIC   IsCurrent boolean
-// MAGIC )
 
 // COMMAND ----------
 
