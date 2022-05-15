@@ -267,7 +267,7 @@ val FilteredPokemons_df =  pokemons_df
        ,$"order"
        ,$"weight"
        ,$"height"
-       ,(($"weight"*10)/($"height"*10)*($"height"*10)).as("BMI")
+       ,(($"weight"/10)/(($"height"/10)*($"height"/10))).as("BMI")
        ,($"types.type.name")(0).as("Type1")
        ,($"types.type.name")(1).as("Type2")
        ,$"sprites.front_default"
