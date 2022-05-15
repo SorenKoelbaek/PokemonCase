@@ -1,17 +1,29 @@
 // Databricks notebook source
+// MAGIC %md # Pokemon streaming ETL Engine
+// MAGIC ### The ETL notebook has 3 main sections with each clear defined responsibilities:
+// MAGIC 
+// MAGIC 
+// MAGIC 
+// MAGIC  1. **The Bronze level / Extraction Area**: Receive our data, and store the data in a table with SCD columns added: _Modified, Current, ValidFrom, ValidTo_ This is also where we split our data into a seperate table containing PII information (in this case; name, id, species and forms) --> if we enable Pseudonymization, these values will be overwritten in the data, and will trigger a an (SCD2 method) merge instead of the otherwise SCD2 method used for our datastorage. The two objects are joinable by a one-way hash value based on the id of the pokemon.
+// MAGIC  2. **The Silver Level/ Transformation Area**: We read our data from the Source layer when available and apply our filtering and transformation logic here. In this case, we retain the two objects: Pokemons and Pokemons_identifier, but we calculate BMI and extract the information we want from the array structure of the source information.
+// MAGIC  3. **The Gold Level / Loading area**: In this area we create the appropiate dimensional model tabels and split our stream into the respective tables with the needed granularity. We then load out data into our reporting tables and make sure they are joinable by a clean albeit arbitrary integer id field.
+
+// COMMAND ----------
+
 //Ingest JSON data into our DeltaLake using autoloader for a streambased ingestion pattern
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql._
 import io.delta.tables._
 import org.apache.spark.sql.types.{ArrayType, IntegerType, StringType, StructField, StructType}
 
-val Pseudonymisation = false //This will convert the name of the pokemon to "PokemonName". A change to the "name" will be seen "downstream" as a back-in-time change and will conform to SCD1 instead of SCD2
+val Pseudonymisation = false //This will convert the name of the pokemon to "PokemonName". A change to the "name" will be seen "downstream" as a back-in-time change and will conform to SCD1 instead of SCD2 --> changing back does not reintroduce names historically!
 
 val Pokemon_df = spark.readStream.format("cloudFiles")
       .option("cloudFiles.format", "json")
       .option("cloudFiles.schemaLocation","/FileStore/Schema/Pokemon")
       .option("cloudFiles.inferColumnTypes", "true")
       .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
+      .option("CloudFiles.includeExistingFiles","false")
       .load("/FileStore/raw/Pokemon/*/*.json")
 
 //we add a ValidFrom and ValidTo values to our database tables
@@ -25,9 +37,7 @@ val pokemons_updates_df = Pokemon_df
                            .withColumn("ValidFrom",to_timestamp(regexp_replace($"current_timestamp","%3A",":"),"yyyy-MM-dd HH:mm:ss.SSS"))
                            .withColumn("ValidTo",lit(EffEnd))
                            .withColumn("Current",lit(true))
-                           
                             
-
 
 
 val Pokemons_identifier_df = Pokemon_df
@@ -35,13 +45,12 @@ val Pokemons_identifier_df = Pokemon_df
                              .select("name","id","species","forms","ValidFrom")
                              .withColumn("Identifier",sha2(col("id").cast(StringType),256))  
                              .withColumn("name",when(lit(Pseudonymisation) === "true","PokemonName").otherwise(col("name")))
-                             .withColumn("id",when(lit(Pseudonymisation) === "true",null).otherwise(col("id")))
-                             .withColumn("species",when(lit(Pseudonymisation) === "true",null).otherwise(col("species")))
-                             .withColumn("forms",when(lit(Pseudonymisation) === "true",null).otherwise(col("forms")))
+                             .withColumn("id",when(lit(Pseudonymisation) === "true",0).otherwise(col("id")))
+                             //.withColumn("species",when(lit(Pseudonymisation) === "true",emptySpecies).otherwise(col("species")))
+                             //.withColumn("forms",when(lit(Pseudonymisation) === "true",Emptyforms).otherwise(col("forms")))
                              .withColumn("ModifiedDate",EffStart)
                              .withColumn("ValidTo",lit(EffEnd))
                              .withColumn("Current",lit(true))
-                                         
 
 
 val deltaTablePokemons = DeltaTable.forName("sourcePokemon")
@@ -371,13 +380,13 @@ FilteredPokemons_df.writeStream
 
 // COMMAND ----------
 
-//Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, ready for consumption by our repotring engine.
+//Lastly we take our transformed tables and outputs them into our reporting layer as dimensional objects, the main purpose here is to utilize the identity columns to maintain unique keys upon changes: ready for consumption by our repotring engine.
 
 val pokemons_df = spark.readStream.format("delta").option("ignoreChanges",true).table("Pokemon") //We use ignorechanges to make sure we get updated rows downstream
 val pokemonIdentifier_df = spark.readStream.format("delta").option("ignoreChanges",true).table("PokemonIdentifier") //We use ignorechanges to make sure we get updated rows downstream
 
 
-//Create the Identity Dimension and write that to the delta-table.
+//Create the Identity DF and write that to the delta-table.
 val dimIdentity_df = pokemonIdentifier_df
     .select(
     col("name").as("Name"),
@@ -386,7 +395,8 @@ val dimIdentity_df = pokemonIdentifier_df
     col("ValidFrom").as("IdentityValidFrom"),
     col("ValidTo").as("IdentityValidTo"),
     col("Current").as("IsCurrent"))
-
+    .filter($"name".isNotNull)
+    .distinct()
 
 val deltadimIdentity = DeltaTable.forName("dimIdentity")
 
@@ -536,5 +546,9 @@ factPokemon_df.writeStream
     .start()
 
           
+
+
+
+// COMMAND ----------
 
 
