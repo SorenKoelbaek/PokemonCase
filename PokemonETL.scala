@@ -31,10 +31,10 @@ val Modified = current_timestamp()
 val EffEnd = java.sql.Timestamp.valueOf("9999-12-31 00:00:00")
 
 case class Pseudo(name: String, url: String)
-var Species = pseudo("PokemonSpecies","PokemonSpecies")
+var Species = Pseudo("PokemonSpecies","PokemonSpecies")
 
-val Forms: Array[pseudo] = Array(
-    pseudo("PokemonForms","PokemonForms")
+val Forms: Array[Pseudo] = Array(
+    Pseudo("PokemonForms","PokemonForms")
 )
 
 val pokemons_updates_df = Pokemon_df
@@ -454,19 +454,19 @@ dimPicture_df.writeStream
 //Create the Fact object and write that to the delta-table.
 
 val factPokemon_df = pokemons_df
-                .select(
-                  col("Type1"),
-                  col("Type2"),
-                  col("front_default").as("PokemonPicture"),
-                  col("Identifier"),
-                  col("height").as("Height"),
-                  col("weight").as("Weight"),
-                  col("order").as("Order"),
-                  col("BMI"),
-                  col("base_experience").as("Base_Experience"),
-                  col("ValidFrom").as("ValidFrom"),
-                  col("ValidTo").as("ValidTo"),
-                  col("Current").as("IsCurrent"))
+                      .select(
+                        col("Type1"),
+                        col("Type2"),
+                        col("front_default").as("PokemonPicture"),
+                        col("Identifier"),
+                        col("height").as("Height"),
+                        col("weight").as("Weight"),
+                        col("order").as("Order"),
+                        col("BMI"),
+                        col("base_experience").as("Base_Experience"),
+                        col("ValidFrom").as("ValidFrom"),
+                        col("ValidTo").as("ValidTo"),
+                        col("Current").as("IsCurrent"))
 
 
           
@@ -475,13 +475,13 @@ val deltafact= DeltaTable.forName("factPokemon")
 
 def LoadPokemon(batchDF: DataFrame, batchId: Long) {
 
-
-val FactBatch = batchDF
-       .as("fact")
-      .join(deltadimType.toDF.as("Type"),$"fact.Type1" === $"Type.Type1" && when($"fact.Type2".isNull,"NAN").otherwise($"fact.Type2") === when($"Type.Type2".isNull,"NAN").otherwise($"Type.Type2"))
-      .join(deltadimPicture.toDF.as("Picture"),$"fact.PokemonPicture" === $"Picture.PokemonPicture")
-      .join(deltadimIdentity.toDF.as("Identity"),$"fact.Identifier" === $"Identity.Identifier" && $"fact.ValidFrom" >= $"Identity.IdentityValidFrom" && $"fact.ValidFrom" <= $"Identity.IdentityValidTo")
-.selectExpr("fact.Identifier","fact.Height","fact.Weight","fact.Order","fact.BMI","fact.Base_Experience","fact.ValidFrom","fact.ValidTo","fact.IsCurrent","Type.TypeID","Picture.PictureID","Identity.IdentityID")
+  
+  val FactBatch = batchDF
+         .as("fact")
+         .join(deltadimType.toDF.as("Type"),$"fact.Type1" === $"Type.Type1" && when($"fact.Type2".isNull,"NAN").otherwise($"fact.Type2") === when($"Type.Type2".isNull,"NAN").otherwise($"Type.Type2"))
+        .join(deltadimPicture.toDF.as("Picture"),$"fact.PokemonPicture" === $"Picture.PokemonPicture")
+        .join(deltadimIdentity.toDF.as("Identity"),$"fact.Identifier" === $"Identity.Identifier" && $"fact.ValidFrom" >= $"Identity.IdentityValidFrom" && $"fact.ValidFrom" <= $"Identity.IdentityValidTo")
+  .selectExpr("fact.Identifier","fact.Height","fact.Weight","fact.Order","cast(fact.BMI as Decimal(10,5))","fact.Base_Experience","fact.ValidFrom","fact.ValidTo","fact.IsCurrent","Type.TypeID","Picture.PictureID","Identity.IdentityID")
 
 
 
@@ -502,9 +502,5 @@ factPokemon_df.writeStream
     .start()
 
           
-
-
-
-// COMMAND ----------
 
 
